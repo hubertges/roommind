@@ -107,6 +107,15 @@ export class RsSensorSection extends LitElement {
   /** Humidity limits in % RH, null = that side not regulated (#518, #526). */
   @property({ attribute: false }) public humidityMax: number | null = null;
   @property({ attribute: false }) public humidityMin: number | null = null;
+  @property({ attribute: false }) public ecoHumidify: number | null = null;
+  @property({ attribute: false }) public ecoDehumidify: number | null = null;
+  @property({ type: Boolean }) public prehumidifyEnabled = true;
+  @property({ type: String }) public humidifierSetpointMode: "proportional" | "direct" =
+    "proportional";
+  @property({ type: Number }) public humidifierSetpointOffset = 0;
+  @property({ type: String }) public dehumidifierSetpointMode: "proportional" | "direct" =
+    "proportional";
+  @property({ type: Number }) public dehumidifierSetpointOffset = 0;
   @property({ type: String }) public dehumidifierEntity = "";
   @property({ type: String }) public humidifierEntity = "";
   /** Sunlight on the room (#303). */
@@ -283,10 +292,20 @@ export class RsSensorSection extends LitElement {
 
   /** The humidity limits and the devices RoomMind runs past them (#518, #526). */
   private _renderHumidityRows() {
-    if (!this.humiditySensor || (this.humidityMax == null && this.humidityMin == null)) {
+    if (!this.humiditySensor) {
       return nothing;
     }
     const l = this.hass.language;
+    if (this.humidityMax == null && this.humidityMin == null && !this.humidifierEntity && !this.dehumidifierEntity) {
+      return html`<rs-list-row
+        clickable
+        chevron
+        icon="mdi:air-humidifier"
+        .heading=${localize("detail.sensors.humidity_control", l)}
+        .secondary=${localize("sensors.no_humidifier", l)}
+        @row-click=${this._fireEdit}
+      ></rs-list-row>`;
+    }
     const live = this.live;
     const range = [
       this.humidityMax != null
@@ -634,7 +653,14 @@ export class RsSensorSection extends LitElement {
               !id.startsWith("climate.") &&
               ((kind !== "ventilation" && kind !== "room_fan") || id.startsWith("fan.")) &&
               ((kind !== "dehumidifier" && kind !== "humidifier") ||
-                id.startsWith("humidifier.")) &&
+                id.startsWith("humidifier.") ||
+                (kind === "humidifier" &&
+                  id.startsWith("switch.") &&
+                  /nawil|humid/i.test(id) &&
+                  !/diod|led|dzwiek|sound|buzzer|display|child_lock/i.test(id)) ||
+                (kind === "dehumidifier" &&
+                  id.startsWith("switch.") &&
+                  /osusz|dehum/i.test(id))) &&
               (kind !== "sun" || sunKind(this.hass.states[id]?.attributes ?? {}) !== "percent") &&
               this._accepts(kind, id),
           )
@@ -1078,16 +1104,29 @@ export class RsSensorSection extends LitElement {
         </rs-list-row>
         ${
           high
-            ? html`<rs-number-field
-                .label=${localize("sensors.humidity_max", l)}
-                .info=${localize("sensors.humidity_max_info", l)}
-                suffix="%"
-                .min=${Math.max(MIN_HUMIDITY_MAX, (this.humidityMin ?? 0) + HUMIDITY_LIMIT_GAP)}
-                .max=${MAX_HUMIDITY_MAX}
-                .value=${this.humidityMax}
-                @value-changed=${(e: CustomEvent<{ value: number }>) =>
-                  this._fireSensorChanged("humidity_max", e.detail.value)}
-              ></rs-number-field>`
+            ? html`<div class="pair">
+                <rs-number-field
+                  .label=${localize("sensors.humidity_max", l)}
+                  .info=${localize("sensors.humidity_max_info", l)}
+                  suffix="%"
+                  .min=${Math.max(MIN_HUMIDITY_MAX, (this.humidityMin ?? 0) + HUMIDITY_LIMIT_GAP)}
+                  .max=${MAX_HUMIDITY_MAX}
+                  .value=${this.humidityMax}
+                  @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                    this._fireSensorChanged("humidity_max", e.detail.value)}
+                ></rs-number-field>
+                <rs-number-field
+                  .label=${`${localize("sensors.humidity_max", l)} (Eco)`}
+                  .info=${localize("sensors.humidity_max_info", l)}
+                  suffix="%"
+                  allow-empty
+                  .min=${Math.max(MIN_HUMIDITY_MAX, (this.humidityMin ?? 0) + HUMIDITY_LIMIT_GAP)}
+                  .max=${MAX_HUMIDITY_MAX}
+                  .value=${this.ecoDehumidify}
+                  @value-changed=${(e: CustomEvent<{ value: number | null }>) =>
+                    this._fireSensorChanged("eco_dehumidify", e.detail.value)}
+                ></rs-number-field>
+              </div>`
             : nothing
         }
         ${
@@ -1127,32 +1166,96 @@ export class RsSensorSection extends LitElement {
         </rs-list-row>
         ${
           low
-            ? html`<rs-number-field
-                .label=${localize("sensors.humidity_min", l)}
-                .info=${localize("sensors.humidity_min_info", l)}
-                suffix="%"
-                .min=${MIN_HUMIDITY_MIN}
-                .max=${Math.min(MAX_HUMIDITY_MIN, (this.humidityMax ?? 100) - HUMIDITY_LIMIT_GAP)}
-                .value=${this.humidityMin}
-                @value-changed=${(e: CustomEvent<{ value: number }>) =>
-                  this._fireSensorChanged("humidity_min", e.detail.value)}
-              ></rs-number-field>`
+            ? html`<div class="pair">
+                <rs-number-field
+                  .label=${localize("sensors.humidity_min", l)}
+                  .info=${localize("sensors.humidity_min_info", l)}
+                  suffix="%"
+                  .min=${MIN_HUMIDITY_MIN}
+                  .max=${Math.min(MAX_HUMIDITY_MIN, (this.humidityMax ?? 100) - HUMIDITY_LIMIT_GAP)}
+                  .value=${this.humidityMin}
+                  @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                    this._fireSensorChanged("humidity_min", e.detail.value)}
+                ></rs-number-field>
+                <rs-number-field
+                  .label=${`${localize("sensors.humidity_min", l)} (Eco)`}
+                  .info=${localize("sensors.humidity_min_info", l)}
+                  suffix="%"
+                  allow-empty
+                  .min=${MIN_HUMIDITY_MIN}
+                  .max=${Math.min(MAX_HUMIDITY_MIN, (this.humidityMax ?? 100) - HUMIDITY_LIMIT_GAP)}
+                  .value=${this.ecoHumidify}
+                  @value-changed=${(e: CustomEvent<{ value: number | null }>) =>
+                    this._fireSensorChanged("eco_humidify", e.detail.value)}
+                ></rs-number-field>
+              </div>`
             : nothing
         }
         ${
           high || low
-            ? html`<p class="note">${localize("sensors.humidity_device_note", l)}</p>`
+            ? html`<rs-list-row
+                switch
+                wrap
+                .heading=${localize("schedule.preheat_label", l)}
+                .checked=${this.prehumidifyEnabled}
+                @toggle-changed=${(e: CustomEvent<boolean>) =>
+                  this._fireSensorChanged("prehumidify_enabled", e.detail)}
+              ></rs-list-row>
+              <p class="note">${localize("sensors.humidity_device_note", l)}</p>`
             : nothing
         }
       </section>
+      ${this._renderKind(
+        "humidifier",
+        inArea("humidifier"),
+        this._renderHumidityDeviceSetpointSettings("humidifier", l),
+      )}
+      ${this._renderKind(
+        "dehumidifier",
+        inArea("dehumidifier"),
+        this._renderHumidityDeviceSetpointSettings("dehumidifier", l),
+      )}`;
+  }
+
+  private _renderHumidityDeviceSetpointSettings(
+    kind: "humidifier" | "dehumidifier",
+    l: string,
+  ) {
+    const entityId = kind === "humidifier" ? this.humidifierEntity : this.dehumidifierEntity;
+    if (!entityId || !entityId.startsWith("humidifier.")) return nothing;
+    const mode =
+      kind === "humidifier" ? this.humidifierSetpointMode : this.dehumidifierSetpointMode;
+    const offset =
+      kind === "humidifier" ? this.humidifierSetpointOffset : this.dehumidifierSetpointOffset;
+    const modeKey =
+      kind === "humidifier" ? "humidifier_setpoint_mode" : "dehumidifier_setpoint_mode";
+    const offsetKey =
+      kind === "humidifier" ? "humidifier_setpoint_offset" : "dehumidifier_setpoint_offset";
+    return html`<rs-field .label=${localize("devices.setpoint_mode", l)}>
+        <rs-segmented
+          wrap
+          .label=${localize("devices.setpoint_mode", l)}
+          .options=${[
+            { value: "proportional", label: localize("devices.setpoint_mode_proportional", l) },
+            { value: "direct", label: localize("devices.setpoint_mode_direct", l) },
+          ]}
+          .value=${mode}
+          @value-changed=${(e: CustomEvent<{ value: string }>) =>
+            this._fireSensorChanged(modeKey, e.detail.value)}
+        ></rs-segmented>
+      </rs-field>
       ${
-        high || this.dehumidifierEntity
-          ? this._renderKind("dehumidifier", inArea("dehumidifier"), nothing)
-          : nothing
-      }
-      ${
-        low || this.humidifierEntity
-          ? this._renderKind("humidifier", inArea("humidifier"), nothing)
+        mode === "direct"
+          ? html`<rs-number-field
+              .label=${localize("devices.setpoint_offset", l)}
+              suffix="%"
+              .min=${-20}
+              .max=${20}
+              .step=${1}
+              .value=${offset}
+              @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                this._fireSensorChanged(offsetKey, e.detail.value)}
+            ></rs-number-field>`
           : nothing
       }`;
   }
@@ -1182,6 +1285,23 @@ export class RsSensorSection extends LitElement {
         composed: true,
       }),
     );
+    if (kind === "humidifier" && entityId && this.humidityMin == null) {
+      this._fireSensorChanged(
+        "humidity_min",
+        Math.max(
+          MIN_HUMIDITY_MIN,
+          Math.min(DEFAULT_HUMIDITY_MIN, (this.humidityMax ?? 100) - HUMIDITY_LIMIT_GAP),
+        ),
+      );
+    } else if (kind === "dehumidifier" && entityId && this.humidityMax == null) {
+      this._fireSensorChanged(
+        "humidity_max",
+        Math.min(
+          MAX_HUMIDITY_MAX,
+          Math.max(DEFAULT_HUMIDITY_MAX, (this.humidityMin ?? 0) + HUMIDITY_LIMIT_GAP),
+        ),
+      );
+    }
   }
 
   private _onOccupancyToggle(entityId: string, checked: boolean) {

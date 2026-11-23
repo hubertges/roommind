@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from ..const import EKF_UPDATE_MIN_DT
 
 if TYPE_CHECKING:
+    from ..control.humidity_model import RoomHumidityModelManager
     from ..control.thermal_model import RoomModelManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -205,3 +206,149 @@ class EkfTrainingManager:
         """Clean up all state for a removed room."""
         self.clear(area_id)
         self.last_temps.pop(area_id, None)
+
+
+class HumidityEkfTrainingManager:
+    """Manages EKF humidity training accumulation and batched updates per room."""
+
+    def __init__(self, model_manager: RoomHumidityModelManager) -> None:
+        self._model_manager = model_manager
+        self._accumulated_dt: dict[str, float] = {}
+        self._accumulated_mode: dict[str, str] = {}
+        self._accumulated_pf: dict[str, float] = {}
+        self._synced: set[str] = set()
+        self._current: set[str] = set()
+        self.last_humidities: dict[str, float] = {}
+
+    def set_model_manager(self, model_manager: RoomHumidityModelManager) -> None:
+        """Update the humidity model manager reference (used after full reset)."""
+        self._model_manager = model_manager
+
+    def flush(
+        self,
+        area_id: str,
+        current_humidity: float,
+        H_outdoor: float,
+        can_humidify: bool,
+        can_dehumidify: bool,
+        q_occupancy: float = 0.0,
+    ) -> None:
+        """Flush accumulated humidity EKF update (on mode change or window open)."""
+        accumulated = self._accumulated_dt.pop(area_id, 0.0)
+        prev_mode = self._accumulated_mode.pop(area_id, None)
+        pf = self._accumulated_pf.pop(area_id, 1.0)
+        if accumulated > 0 and prev_mode is not None:
+            self._model_manager.update(
+                area_id,
+                current_humidity,
+                H_outdoor,
+                prev_mode,
+                accumulated,
+                can_humidify=can_humidify,
+                can_dehumidify=can_dehumidify,
+                power_fraction=pf,
+                q_occupancy=q_occupancy,
+            )
+
+    def process(
+        self,
+        area_id: str,
+        current_humidity: float,
+        H_outdoor: float,
+        ekf_mode: str | None,
+        ekf_pf: float,
+        window_open: bool,
+        raw_open: bool,
+        can_humidify: bool,
+        can_dehumidify: bool,
+        dt_minutes: float,
+        q_occupancy: float = 0.0,
+    ) -> None:
+        """Process a humidity EKF training step for a room."""
+        if window_open or raw_open:
+            was_current = area_id in self._current
+            self.flush(
+                area_id,
+                current_humidity,
+                H_outdoor,
+                can_humidify,
+                can_dehumidify,
+                q_occupancy=q_occupancy,
+            )
+            self.clear(area_id)
+            self._model_manager.update_window_open(
+                area_id,
+                current_humidity,
+                H_outdoor,
+                dt_minutes,
+                learn_k_window=(window_open and was_current),
+            )
+            self._synced.add(area_id)
+            self._current.add(area_id)
+        elif ekf_mode is None:
+            self.flush(
+                area_id,
+                current_humidity,
+                H_outdoor,
+                can_humidify,
+                can_dehumidify,
+                q_occupancy=q_occupancy,
+            )
+            self.clear(area_id)
+        elif area_id not in self._synced:
+            self._model_manager.sync_humidity(area_id, current_humidity)
+            self._synced.add(area_id)
+            self._current.add(area_id)
+        else:
+            self._current.add(area_id)
+            prev_mode = self._accumulated_mode.get(area_id)
+            if prev_mode is not None and prev_mode != ekf_mode:
+                self.flush(
+                    area_id,
+                    current_humidity,
+                    H_outdoor,
+                    can_humidify,
+                    can_dehumidify,
+                    q_occupancy=q_occupancy,
+                )
+
+            old_dt = self._accumulated_dt.get(area_id, 0.0)
+            new_dt = old_dt + dt_minutes
+            if new_dt > 0:
+                old_pf = self._accumulated_pf.get(area_id, 1.0)
+                self._accumulated_pf[area_id] = (
+                    old_pf * old_dt + ekf_pf * dt_minutes
+                ) / new_dt
+            self._accumulated_dt[area_id] = new_dt
+            self._accumulated_mode[area_id] = ekf_mode
+
+            if self._accumulated_dt[area_id] >= EKF_UPDATE_MIN_DT:
+                pf = self._accumulated_pf.pop(area_id, 1.0)
+                self._model_manager.update(
+                    area_id,
+                    current_humidity,
+                    H_outdoor,
+                    ekf_mode,
+                    self._accumulated_dt[area_id],
+                    can_humidify=can_humidify,
+                    can_dehumidify=can_dehumidify,
+                    power_fraction=pf,
+                    q_occupancy=q_occupancy,
+                )
+                self._accumulated_dt[area_id] = 0.0
+
+        self.last_humidities[area_id] = current_humidity
+
+    def clear(self, area_id: str, *, resync: bool = True) -> None:
+        """Clear accumulated humidity EKF state for a room."""
+        self._current.discard(area_id)
+        if resync:
+            self._synced.discard(area_id)
+        self._accumulated_dt.pop(area_id, None)
+        self._accumulated_mode.pop(area_id, None)
+        self._accumulated_pf.pop(area_id, None)
+
+    def remove_room(self, area_id: str) -> None:
+        """Clean up all state for a removed room."""
+        self.clear(area_id)
+        self.last_humidities.pop(area_id, None)

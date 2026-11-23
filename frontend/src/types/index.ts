@@ -4,7 +4,11 @@
 
 export type ClimateMode = "auto" | "heat_only" | "cool_only";
 
+export type HumidityMode = "auto" | "humidify_only" | "dehumidify_only";
+
 export type RoomMode = "idle" | "heating" | "cooling";
+
+export type HumidityAction = "idle" | "humidifying" | "dehumidifying";
 
 export type OverrideType = "boost" | "eco" | "custom";
 
@@ -71,6 +75,21 @@ export interface RoomLiveData {
   /** An AC runs in dry for the too humid room (#440). */
   ac_dry_active?: boolean;
   humidifier_active?: boolean;
+  /** MPC / schedule humidity control live values. */
+  humidify_target?: number | null;
+  dehumidify_target?: number | null;
+  target_humidity?: number | null;
+  humidity_action?: HumidityAction;
+  humidifying_power?: number;
+  humidity_device_setpoint?: number | null;
+  humidity_mpc_active?: boolean;
+  humidity_confidence?: number | null;
+  prehumidify?: boolean;
+  override_humidity_active?: boolean;
+  override_humidity_type?: OverrideType | null;
+  override_humidify?: number | null;
+  override_dehumidify?: number | null;
+  override_humidity_until?: number | null;
   /** Sun sensor (#303); null without one. */
   solar_sensor?: SolarSensorLive | null;
   /** RoomMind runs the room fan while the room heats or cools (#266). */
@@ -182,6 +201,98 @@ export type PresenceAwayAction = "eco" | "off" | "away";
 
 export type MasterOffMode = "off" | "temperature";
 
+export type HeatPlantType =
+  | "coal_boiler"
+  | "pellet_boiler"
+  | "wood_boiler"
+  | "gas_boiler"
+  | "electric_heater"
+  | "air_heater"
+  | "heat_pump";
+
+export type FuelType = "coal" | "pellet" | "wood" | "gas" | "electricity";
+
+export interface HeatPlantConfig {
+  id: string;
+  name: string;
+  plant_type: HeatPlantType;
+  enabled: boolean;
+  assigned_devices: string[];
+  assigned_rooms: string[];
+  source_entity: string;
+  target_supply_temp: number;
+  idle_supply_temp: number;
+  off_mode: "off" | "temperature";
+  min_rooms_demand: number;
+  supply_temp_sensor: string;
+  return_temp_sensor: string;
+  dhw_temp_sensor: string;
+  flue_temp_sensor: string;
+  ch_pump_entity: string;
+  ch_pump_min_supply_temp: number;
+  ch_pump_overrun_temp: number;
+  dhw_pump_entity: string;
+  dhw_target_temp: number;
+  dhw_hysteresis: number;
+  dhw_min_supply_delta: number;
+  fuel_type: FuelType;
+  calorific_value_mj_kg: number;
+  calorific_value_kwh_m3: number;
+  efficiency_pct: number;
+  cop: number;
+  nominal_power_kw: number;
+  fuel_price: number;
+  currency: string;
+  energy_sensor: string;
+  fuel_consumption_sensor: string;
+}
+
+export interface HeatPlantLive {
+  id: string;
+  state:
+    | "heating"
+    | "dhw"
+    | "heating_and_dhw"
+    | "overheat_protect"
+    | "active"
+    | "idle";
+  source_active: boolean;
+  heating_demand: boolean;
+  dhw_demand: boolean;
+  overheat_protect: boolean;
+  supply_temp: number | null;
+  return_temp: number | null;
+  delta_t: number | null;
+  dhw_temp: number | null;
+  flue_temp: number | null;
+  ch_pump_active: boolean;
+  ch_pump_blocked_cold: boolean;
+  dhw_pump_active: boolean;
+  dhw_pump_blocked_cold: boolean;
+  demanding_rooms: string[];
+  active_devices: string[];
+  mean_power_pct: number;
+  max_power_pct: number;
+  fuel_unit: "kg" | "m³" | "kWh";
+  chemical_kwh_per_kg: number;
+  usable_kwh_per_kg: number;
+  current_thermal_kw: number;
+  current_input_kw: number;
+  burn_rate_per_h: number;
+  cost_per_hour: number;
+  cost_per_kwh_thermal: number;
+  runtime_hours_today: number;
+  runtime_hours_total: number;
+  thermal_kwh_today: number;
+  thermal_kwh_total: number;
+  input_kwh_today: number;
+  input_kwh_total: number;
+  fuel_consumed_today: number;
+  fuel_consumed_total: number;
+  cost_today: number;
+  cost_total: number;
+}
+
 export interface RoomConfig {
   area_id: string;
   thermostats: string[];
@@ -203,6 +314,18 @@ export interface RoomConfig {
   /** % RH; null = not regulated. Too humid from max on, too dry from min on (#518, #526). */
   humidity_max?: number | null;
   humidity_min?: number | null;
+  humidity_mode?: HumidityMode;
+  comfort_humidify?: number | null;
+  comfort_dehumidify?: number | null;
+  eco_humidify?: number | null;
+  eco_dehumidify?: number | null;
+  away_humidify?: number | null;
+  away_dehumidify?: number | null;
+  prehumidify_enabled?: boolean;
+  humidifier_setpoint_mode?: "proportional" | "direct";
+  humidifier_setpoint_offset?: number;
+  dehumidifier_setpoint_mode?: "proportional" | "direct";
+  dehumidifier_setpoint_offset?: number;
   /** humidifier.*, switch.* or input_boolean.* RoomMind runs past the limits. */
   dehumidifier_entity?: string;
   humidifier_entity?: string;
@@ -321,6 +444,7 @@ export interface GlobalSettings {
   mold_prevention_notify_enabled?: boolean;
   mold_prevention_notify_targets?: NotificationTarget[];
   compressor_groups?: CompressorGroup[];
+  heat_plants?: HeatPlantConfig[];
   room_order?: string[];
   group_by_floor?: boolean;
   floor_order?: string[];

@@ -303,3 +303,97 @@ def hourly_history(points: Iterable[tuple[float, float]]) -> list[tuple[float, f
         acc[0] += price
         acc[1] += 1
     return [(h, acc[0] / acc[1]) for h, acc in sorted(sums.items())]
+
+
+# ---------------------------------------------------------------------------
+# Tauron Polska Energia (Tauron Dystrybucja / Sprzedaż) electricity tariff
+# ---------------------------------------------------------------------------
+# Total gross residential energy + variable distribution rate (PLN/kWh, incl. 23% VAT & excise):
+# - Off-peak / Strefa II (tania: 13:00-15:00, 22:00-06:00 oraz weekendy w G12w): ~0.78 PLN/kWh
+# - Standard / G11 całodobowa: ~1.11 PLN/kWh
+# - Peak / Strefa I (szczytowa: 06:00-13:00, 15:00-22:00 w dni robocze): ~1.34 PLN/kWh
+TAURON_RATE_PEAK_PLN = 1.34
+TAURON_RATE_OFFPEAK_PLN = 0.78
+TAURON_RATE_G11_PLN = 1.11
+TAURON_OFFPEAK_HOURS = frozenset({0, 1, 2, 3, 4, 5, 13, 14, 22, 23})
+
+# Fixed Polish public holidays (month, day) observed as off-peak in Tauron G12w
+_PL_FIXED_HOLIDAYS = frozenset(
+    {
+        (1, 1),   # Nowy Rok
+        (1, 6),   # Trzech Króli
+        (5, 1),   # Święto Pracy
+        (5, 3),   # Święto Konstytucji 3 Maja
+        (8, 15),  # Wniebowzięcie NMP
+        (11, 1),  # Wszystkich Świętych
+        (11, 11), # Narodowe Święto Niepodległości
+        (12, 24), # Wigilia
+        (12, 25), # Boże Narodzenie (1. dzień)
+        (12, 26), # Boże Narodzenie (2. dzień)
+    }
+)
+
+
+def is_tauron_offpeak(local_dt: datetime, tariff: str = "G12w") -> bool:
+    """Return True if ``local_dt`` falls into Tauron's off-peak (Strefa II / tania) zone."""
+    t_upper = tariff.upper()
+    if t_upper == "G11":
+        return False
+    if t_upper == "G12W":
+        if local_dt.weekday() >= 5 or (local_dt.month, local_dt.day) in _PL_FIXED_HOLIDAYS:
+            return True
+    return local_dt.hour in TAURON_OFFPEAK_HOURS
+
+
+def tauron_price_for_dt(local_dt: datetime, tariff: str = "G12w") -> tuple[float, str]:
+    """Return ``(price_pln_per_kwh, zone_name)`` for a local datetime under a Tauron tariff."""
+    if tariff.upper() == "G11":
+        return TAURON_RATE_G11_PLN, "całodobowa"
+    if is_tauron_offpeak(local_dt, tariff):
+        return TAURON_RATE_OFFPEAK_PLN, "pozaszczytowa (tania)"
+    return TAURON_RATE_PEAK_PLN, "szczytowa (droga)"
+
+
+def build_tauron_forecast(now_ts: float | None = None, tariff: str = "G12w") -> dict[str, Any]:
+    """Build current Tauron electricity price and 48h hourly forecast attributes (today + tomorrow)."""
+    from datetime import timedelta
+
+    now_dt = (
+        dt_util.as_local(dt_util.utc_from_timestamp(now_ts))
+        if now_ts is not None
+        else dt_util.now()
+    )
+    current_price, current_zone = tauron_price_for_dt(now_dt, tariff)
+    start_of_today = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    raw_today: list[dict[str, Any]] = []
+    raw_tomorrow: list[dict[str, Any]] = []
+    for h in range(48):
+        slot_start = start_of_today + timedelta(hours=h)
+        slot_end = slot_start + timedelta(hours=1)
+        price, zone = tauron_price_for_dt(slot_start, tariff)
+        entry = {
+            "start": slot_start.isoformat(),
+            "end": slot_end.isoformat(),
+            "value": price,
+            "price": price,
+            "zone": zone,
+        }
+        if h < 24:
+            raw_today.append(entry)
+        else:
+            raw_tomorrow.append(entry)
+
+    return {
+        "current_price": current_price,
+        "zone": current_zone,
+        "tariff": tariff,
+        "operator": "Tauron Dystrybucja / Tauron Sprzedaż",
+        "region": "Polska Południowa / Dolny Śląsk (Tauron)",
+        "peak_rate_pln_kwh": TAURON_RATE_PEAK_PLN,
+        "offpeak_rate_pln_kwh": TAURON_RATE_OFFPEAK_PLN,
+        "g11_rate_pln_kwh": TAURON_RATE_G11_PLN,
+        "raw_today": raw_today,
+        "raw_tomorrow": raw_tomorrow,
+        "forecast": raw_today + raw_tomorrow,
+    }

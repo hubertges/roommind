@@ -1,12 +1,21 @@
 import { LitElement, html, css, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import type { HomeAssistant, HassArea, DeviceConfig, DeviceType } from "../types";
+import type { HomeAssistant, HassArea, DeviceConfig, DeviceType, RoomLiveData } from "../types";
 import { getEntitiesForArea } from "../utils/room-state";
 import { localize } from "../utils/localize";
 import { getSelectValue, openEntityInfo } from "../utils/events";
 import { tempUnit, toDisplayDelta } from "../utils/temperature";
 import { fanModeLabel, resolveHeatingSystemType } from "../utils/device-utils";
-import { formatMinutes, formatNumber } from "../utils/format";
+import { formatMinutes, formatNumber, formatPercent } from "../utils/format";
+import {
+  DEFAULT_HUMIDITY_MAX,
+  DEFAULT_HUMIDITY_MIN,
+  HUMIDITY_LIMIT_GAP,
+  MAX_HUMIDITY_MAX,
+  MAX_HUMIDITY_MIN,
+  MIN_HUMIDITY_MAX,
+  MIN_HUMIDITY_MIN,
+} from "../utils/constants";
 import { tokens } from "../styles/tokens";
 import { inputStyles } from "../styles/input-styles";
 import { formStyles } from "../styles/form-styles";
@@ -45,6 +54,21 @@ export class RsDeviceSection extends LitElement {
   @property({ attribute: false }) public area!: HassArea;
   @property({ attribute: false }) public devices: DeviceConfig[] = [];
   @property({ type: String }) public selectedTempSensor = "";
+  @property({ type: String }) public humiditySensor = "";
+  @property({ type: String }) public humidifierEntity = "";
+  @property({ type: String }) public dehumidifierEntity = "";
+  @property({ attribute: false }) public humidityMin: number | null = null;
+  @property({ attribute: false }) public humidityMax: number | null = null;
+  @property({ attribute: false }) public ecoHumidify: number | null = null;
+  @property({ attribute: false }) public ecoDehumidify: number | null = null;
+  @property({ type: Boolean }) public prehumidifyEnabled = true;
+  @property({ type: String }) public humidifierSetpointMode: "proportional" | "direct" =
+    "proportional";
+  @property({ type: Number }) public humidifierSetpointOffset = 0;
+  @property({ type: String }) public dehumidifierSetpointMode: "proportional" | "direct" =
+    "proportional";
+  @property({ type: Number }) public dehumidifierSetpointOffset = 0;
+  @property({ attribute: false }) public live?: RoomLiveData;
   @property({ attribute: false }) public valveProtectionExclude: Set<string> = new Set();
   @property({ type: Boolean }) public valveProtectionEnabled = false;
   @property({ type: Boolean }) public coilDryEnabledGlobal = false;
@@ -88,7 +112,11 @@ export class RsDeviceSection extends LitElement {
   }
 
   protected willUpdate(changed: PropertyValues): void {
-    if (changed.has("devices")) {
+    if (
+      changed.has("devices") ||
+      changed.has("humidifierEntity") ||
+      changed.has("dehumidifierEntity")
+    ) {
       this._selectedThermostats = new Set(
         this.devices.filter((d) => d.type === "trv").map((d) => d.entity_id),
       );
@@ -99,19 +127,32 @@ export class RsDeviceSection extends LitElement {
 
       // Keep _selectedForEdit valid: clear if device was removed,
       // auto-select first device when nothing is selected.
-      const inRoom = new Set(this.devices.map((d) => d.entity_id));
+      const inRoom = this._allInRoomIds();
       if (this._selectedForEdit && !inRoom.has(this._selectedForEdit)) {
         this._selectedForEdit = "";
         this._detailOpen = false;
       }
-      if (!this._selectedForEdit && this.devices.length > 0) {
-        this._selectedForEdit = this._orderedDevices()[0].entity_id;
+      if (!this._selectedForEdit) {
+        if (this.devices.length > 0) {
+          this._selectedForEdit = this._orderedDevices()[0].entity_id;
+        } else if (this.humidifierEntity) {
+          this._selectedForEdit = this.humidifierEntity;
+        } else if (this.dehumidifierEntity) {
+          this._selectedForEdit = this.dehumidifierEntity;
+        }
       }
     }
-    if (changed.has("focusEntity") && this.devices.some((d) => d.entity_id === this.focusEntity)) {
+    if (changed.has("focusEntity") && this._allInRoomIds().has(this.focusEntity)) {
       this._selectedForEdit = this.focusEntity;
       this._detailOpen = true;
     }
+  }
+
+  private _allInRoomIds(): Set<string> {
+    const ids = new Set(this.devices.map((d) => d.entity_id));
+    if (this.humidifierEntity) ids.add(this.humidifierEntity);
+    if (this.dehumidifierEntity) ids.add(this.dehumidifierEntity);
+    return ids;
   }
 
   protected updated(changed: PropertyValues): void {
@@ -266,19 +307,97 @@ export class RsDeviceSection extends LitElement {
       ...this.devices.filter((d) => d.type === "trv"),
       ...this.devices.filter((d) => d.type !== "trv"),
     ];
+    const hasAny =
+      ordered.length > 0 || Boolean(this.humidifierEntity) || Boolean(this.dehumidifierEntity);
     return html`
       ${ordered.map((d) => this._renderViewRow(d))}
+      ${this.humidifierEntity ? this._renderHumidityDeviceViewRow(this.humidifierEntity, "humidifier") : nothing}
+      ${this.dehumidifierEntity ? this._renderHumidityDeviceViewRow(this.dehumidifierEntity, "dehumidifier") : nothing}
       <rs-list-row
         clickable
         plain-icon
         variant="primary"
         icon="mdi:plus"
         .heading=${localize("detail.devices.add", l)}
-        .secondary=${ordered.length ? "" : localize("detail.devices.none_hint", l)}
-        ?wrap=${!ordered.length}
+        .secondary=${hasAny ? "" : localize("detail.devices.none_hint", l)}
+        ?wrap=${!hasAny}
         @row-click=${(e: Event) => this._fireEdit(e)}
       ></rs-list-row>
     `;
+  }
+
+  private _renderHumidityDeviceViewRow(entityId: string, role: "humidifier" | "dehumidifier") {
+    const l = this.hass.language;
+    const st = this.hass.states[entityId];
+    const friendlyName = (st?.attributes?.friendly_name as string) || entityId;
+    const status = this._humidityDeviceLiveStatus(entityId, role);
+    const parts: string[] = [
+      localize(
+        role === "humidifier" ? "detail.sensors.humidifier" : "detail.sensors.dehumidifier",
+        l,
+      ),
+    ];
+    const target = role === "humidifier" ? this.humidityMin : this.humidityMax;
+    if (target != null) {
+      parts.push(
+        localize(
+          role === "humidifier" ? "sensors.humidity_range_low" : "sensors.humidity_range_high",
+          l,
+          { value: target },
+        ),
+      );
+    }
+    const mode =
+      role === "humidifier" ? this.humidifierSetpointMode : this.dehumidifierSetpointMode;
+    if (mode === "direct" && this.humiditySensor) {
+      parts.push(localize("devices.setpoint_mode_direct", l));
+    }
+    const value = [status.text, status.humidity].filter(Boolean).join(" · ");
+
+    return html`<rs-list-row
+      clickable
+      chevron
+      .icon=${role === "humidifier" ? "mdi:air-humidifier" : "mdi:water-minus"}
+      .iconColor=${status.color}
+      icon-label=${localize("detail.more_info", l)}
+      .heading=${friendlyName}
+      .secondary=${parts.join(" · ")}
+      .value=${value}
+      @row-click=${(e: Event) => this._fireEdit(e, entityId)}
+      @icon-click=${() => openEntityInfo(this, entityId)}
+    ></rs-list-row>`;
+  }
+
+  private _humidityDeviceLiveStatus(
+    entityId: string,
+    role: "humidifier" | "dehumidifier",
+  ): { text: string; color: string; humidity: string } {
+    const l = this.hass.language;
+    const st = this.hass.states[entityId];
+    if (!st || st.state === "unavailable") {
+      return { text: localize("detail.devices.unavailable", l), color: "", humidity: "" };
+    }
+    const active =
+      role === "humidifier" ? !!this.live?.humidifier_active : !!this.live?.dehumidifier_active;
+    const isOn = st.state === "on" || st.state === "humidifying" || st.state === "drying";
+    let text = "";
+    let color = "";
+    if (active || isOn) {
+      text = localize("detail.on", l);
+      color = role === "humidifier" ? "var(--rs-cool)" : "var(--rs-ok)";
+    } else if (st.state === "off") {
+      text = localize("card.state.off", l);
+    } else {
+      text = st.state;
+    }
+    const ch =
+      typeof st.attributes?.current_humidity === "number"
+        ? st.attributes.current_humidity
+        : typeof this.live?.current_humidity === "number"
+          ? this.live.current_humidity
+          : null;
+    const humidity = typeof ch === "number" ? formatPercent(ch, this.hass) : "";
+    return { text, color, humidity };
   }
 
   /** "Thermostat · Heizkörper · Absenkung · Direktes Ventil": type and what is set apart. */
@@ -414,22 +533,60 @@ export class RsDeviceSection extends LitElement {
       .filter((id) => id.startsWith("climate.") && !id.startsWith("climate.roommind_"));
   }
 
+  /** Humidifier and dehumidifier entities of the area (humidifier.* and matching switch.*). */
+  private _areaHumidityDeviceIds(): string[] {
+    return getEntitiesForArea(this.area.area_id, this.hass?.entities, this.hass?.devices)
+      .map((e) => e.entity_id)
+      .filter((id) => {
+        const afterDot = id.substring(id.indexOf(".") + 1);
+        if (afterDot.startsWith("roommind_")) return false;
+        if (id.startsWith("humidifier.")) return true;
+        if (
+          id.startsWith("switch.") &&
+          /nawil|humid|osusz|dehum/i.test(id) &&
+          !/diod|led|dzwiek|sound|buzzer|display|child_lock|safe_mode/i.test(id)
+        ) {
+          return true;
+        }
+        return false;
+      });
+  }
+
+  private _detectHumidityRole(entityId: string): "humidifier" | "dehumidifier" {
+    const dc = this.hass?.states?.[entityId]?.attributes?.device_class as string | undefined;
+    if (dc === "dehumidifier" || /osusz|dehum/i.test(entityId)) return "dehumidifier";
+    return "humidifier";
+  }
+
+  private _humidityRoleOf(entityId: string): "humidifier" | "dehumidifier" | null {
+    if (entityId && entityId === this.humidifierEntity) return "humidifier";
+    if (entityId && entityId === this.dehumidifierEntity) return "dehumidifier";
+    return null;
+  }
+
   private _renderEditMode() {
     const device = this.devices.find((d) => d.entity_id === this._selectedForEdit);
+    const humRole = !device ? this._humidityRoleOf(this._selectedForEdit) : null;
+    const hasSelection = Boolean(device || humRole);
+    const detailContent = device
+      ? this._renderDeviceDetail(device)
+      : humRole
+        ? this._renderHumidityDeviceDetail(this._selectedForEdit, humRole)
+        : nothing;
     if (this._narrow) {
-      if (this._detailOpen && device) {
+      if (this._detailOpen && hasSelection) {
         return html`<button type="button" class="back" @click=${this._onBack}>
             <ha-icon icon="mdi:arrow-left" aria-hidden="true"></ha-icon>
             ${localize("detail.devices.back", this.hass.language)}
           </button>
-          <div class="detail flat">${this._renderDeviceDetail(device)}</div>`;
+          <div class="detail flat">${detailContent}</div>`;
       }
       return html`${this._renderList()} ${this._renderRoomSection()}`;
     }
     return html`
-      <div class="md ${device ? "" : "single"}">
+      <div class="md ${hasSelection ? "" : "single"}">
         ${this._renderList()}
-        ${device ? html`<div class="detail box">${this._renderDeviceDetail(device)}</div>` : nothing}
+        ${hasSelection ? html`<div class="detail box">${detailContent}</div>` : nothing}
       </div>
       ${this._renderRoomSection()}
     `;
@@ -437,13 +594,20 @@ export class RsDeviceSection extends LitElement {
 
   private _renderList() {
     const l = this.hass.language;
-    const inRoom = new Set(this.devices.map((d) => d.entity_id));
-    const suggestions = this._areaClimateIds().filter((id) => !inRoom.has(id));
+    const inRoom = this._allInRoomIds();
+    const suggestions = [
+      ...this._areaClimateIds(),
+      ...this._areaHumidityDeviceIds(),
+    ].filter((id) => !inRoom.has(id));
+    const hasInRoom =
+      this.devices.length > 0 || Boolean(this.humidifierEntity) || Boolean(this.dehumidifierEntity);
     return html`<div class="list">
       ${
-        this.devices.length
+        hasInRoom
           ? html`<h4 class="group-title">${localize("detail.devices.in_room", l)}</h4>
-              ${this._orderedDevices().map((d) => this._renderListRow(d))}`
+              ${this._orderedDevices().map((d) => this._renderListRow(d))}
+              ${this.humidifierEntity ? this._renderHumidityListRow(this.humidifierEntity, "humidifier") : nothing}
+              ${this.dehumidifierEntity ? this._renderHumidityListRow(this.dehumidifierEntity, "dehumidifier") : nothing}`
           : nothing
       }
       ${
@@ -453,19 +617,51 @@ export class RsDeviceSection extends LitElement {
           : nothing
       }
       ${
-        !this.devices.length && !suggestions.length
+        !hasInRoom && !suggestions.length
           ? html`<p class="note">${localize("devices.no_climate", l)}</p>`
           : nothing
       }
       <ha-entity-picker
         .hass=${this.hass}
-        .includeDomains=${["climate"]}
+        .includeDomains=${["climate", "humidifier", "switch", "input_boolean"]}
         .entityFilter=${this._entityFilter}
         .value=${""}
         .label=${localize("detail.devices.add", l)}
         @value-changed=${this._onEntityPicked}
       ></ha-entity-picker>
     </div>`;
+  }
+
+  private _renderHumidityListRow(entityId: string, role: "humidifier" | "dehumidifier") {
+    const l = this.hass.language;
+    const status = this._humidityDeviceLiveStatus(entityId, role);
+    const areaHumIds = this._areaHumidityDeviceIds();
+    const areaAllIds = getEntitiesForArea(
+      this.area.area_id,
+      this.hass?.entities,
+      this.hass?.devices,
+    ).map((e) => e.entity_id);
+    const external = !areaHumIds.includes(entityId) && !areaAllIds.includes(entityId);
+    const secondary = [
+      localize(
+        role === "humidifier" ? "detail.sensors.humidifier" : "detail.sensors.dehumidifier",
+        l,
+      ),
+      status.text,
+      external ? localize("devices.other_area", l) : "",
+    ].filter(Boolean);
+    return html`<rs-list-row
+      clickable
+      data-eid=${entityId}
+      .chevron=${this._narrow}
+      .selected=${!this._narrow && entityId === this._selectedForEdit}
+      .icon=${role === "humidifier" ? "mdi:air-humidifier" : "mdi:water-minus"}
+      .iconColor=${status.color}
+      .heading=${this._name(entityId)}
+      .secondary=${secondary.join(" · ")}
+      .value=${status.humidity}
+      @row-click=${() => this._openDetail(entityId)}
+    ></rs-list-row>`;
   }
 
   private _renderListRow(device: DeviceConfig) {
@@ -494,14 +690,22 @@ export class RsDeviceSection extends LitElement {
 
   private _renderSuggestion(entityId: string) {
     const l = this.hass.language;
+    const isClimate = entityId.startsWith("climate.");
+    const role = isClimate ? null : this._detectHumidityRole(entityId);
+    const val = isClimate
+      ? this._liveStatus(entityId, false).temp
+      : this._humidityDeviceLiveStatus(entityId, role!).humidity;
+    const sub = isClimate
+      ? localize("detail.devices.add_suggestion", l)
+      : `${localize(role === "humidifier" ? "detail.sensors.humidifier" : "detail.sensors.dehumidifier", l)} · ${localize("detail.devices.add_suggestion", l)}`;
     return html`<rs-list-row
       clickable
       plain-icon
       icon="mdi:plus"
       .heading=${this._name(entityId)}
-      .secondary=${localize("detail.devices.add_suggestion", l)}
-      .value=${this._liveStatus(entityId, false).temp}
-      @row-click=${() => this._addDevice(entityId)}
+      .secondary=${sub}
+      .value=${val}
+      @row-click=${() => (isClimate ? this._addDevice(entityId) : this._addHumidityDevice(entityId, role!))}
     ></rs-list-row>`;
   }
 
@@ -1016,6 +1220,191 @@ export class RsDeviceSection extends LitElement {
       ></rs-confirm-dialog>`;
   }
 
+  private _renderHumidityDeviceDetail(entityId: string, role: "humidifier" | "dehumidifier") {
+    const l = this.hass.language;
+    const isHum = role === "humidifier";
+    const status = this._humidityDeviceLiveStatus(entityId, role);
+    const areaAllIds = getEntitiesForArea(
+      this.area.area_id,
+      this.hass?.entities,
+      this.hass?.devices,
+    ).map((e) => e.entity_id);
+    const external = !areaAllIds.includes(entityId);
+    const dc = this.hass.states[entityId]?.attributes?.device_class as string | undefined;
+    const canSwitchRole =
+      !entityId.startsWith("humidifier.") || (dc !== "humidifier" && dc !== "dehumidifier");
+    const spMode = isHum ? this.humidifierSetpointMode : this.dehumidifierSetpointMode;
+    const spOffset = isHum ? this.humidifierSetpointOffset : this.dehumidifierSetpointOffset;
+    const spModeKey = isHum ? "humidifier_setpoint_mode" : "dehumidifier_setpoint_mode";
+    const spOffsetKey = isHum ? "humidifier_setpoint_offset" : "dehumidifier_setpoint_offset";
+    const targetVal = isHum
+      ? (this.humidityMin ?? DEFAULT_HUMIDITY_MIN)
+      : (this.humidityMax ?? DEFAULT_HUMIDITY_MAX);
+    const ecoVal = isHum ? this.ecoHumidify : this.ecoDehumidify;
+
+    return html`
+      <rs-list-row
+        class="detail-head"
+        wrap
+        single-line
+        .icon=${isHum ? "mdi:air-humidifier" : "mdi:water-minus"}
+        .iconColor=${status.color}
+        icon-label=${localize("detail.more_info", l)}
+        .heading=${this._name(entityId)}
+        .secondary=${[entityId, external ? localize("devices.other_area", l) : ""]
+          .filter(Boolean)
+          .join(" · ")}
+        .value=${[status.text, status.humidity].filter(Boolean).join(" · ")}
+        @icon-click=${() => openEntityInfo(this, entityId)}
+      ></rs-list-row>
+
+      ${
+        canSwitchRole
+          ? html`<div class="group">
+              <h4 class="group-title">${localize("devices.type_label", l)}</h4>
+              ${this._choice(
+                localize("devices.type_label", l),
+                [
+                  {
+                    value: "humidifier",
+                    label: localize("detail.sensors.humidifier", l),
+                    icon: "mdi:air-humidifier",
+                  },
+                  {
+                    value: "dehumidifier",
+                    label: localize("detail.sensors.dehumidifier", l),
+                    icon: "mdi:water-minus",
+                  },
+                ],
+                role,
+                (v) =>
+                  this._onHumidityDeviceRoleChange(
+                    entityId,
+                    role,
+                    v as "humidifier" | "dehumidifier",
+                  ),
+              )}
+            </div>`
+          : nothing
+      }
+
+      <div class="group">
+        <h4 class="group-title">
+          ${localize("detail.sensors.humidity_control", l)}
+          <rs-info-icon .text=${localize("sensors.humidity_control_info", l)}></rs-info-icon>
+        </h4>
+        ${
+          isHum
+            ? html`<rs-number-field
+                  .label=${localize("sensors.humidity_min", l)}
+                  .info=${localize("sensors.humidity_min_info", l)}
+                  suffix="%"
+                  .min=${MIN_HUMIDITY_MIN}
+                  .max=${Math.min(MAX_HUMIDITY_MIN, (this.humidityMax ?? 100) - HUMIDITY_LIMIT_GAP)}
+                  .value=${targetVal}
+                  @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                    this._fireSensorChanged("humidity_min", e.detail.value)}
+                ></rs-number-field>
+                <rs-number-field
+                  .label=${`${localize("sensors.humidity_min", l)} (Eco)`}
+                  .info=${localize("sensors.humidity_min_info", l)}
+                  suffix="%"
+                  allow-empty
+                  .min=${MIN_HUMIDITY_MIN}
+                  .max=${Math.min(MAX_HUMIDITY_MIN, (this.humidityMax ?? 100) - HUMIDITY_LIMIT_GAP)}
+                  .value=${ecoVal}
+                  @value-changed=${(e: CustomEvent<{ value: number | null }>) =>
+                    this._fireSensorChanged("eco_humidify", e.detail.value)}
+                ></rs-number-field>`
+            : html`<rs-number-field
+                  .label=${localize("sensors.humidity_max", l)}
+                  .info=${localize("sensors.humidity_max_info", l)}
+                  suffix="%"
+                  .min=${Math.max(MIN_HUMIDITY_MAX, (this.humidityMin ?? 0) + HUMIDITY_LIMIT_GAP)}
+                  .max=${MAX_HUMIDITY_MAX}
+                  .value=${targetVal}
+                  @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                    this._fireSensorChanged("humidity_max", e.detail.value)}
+                ></rs-number-field>
+                <rs-number-field
+                  .label=${`${localize("sensors.humidity_max", l)} (Eco)`}
+                  .info=${localize("sensors.humidity_max_info", l)}
+                  suffix="%"
+                  allow-empty
+                  .min=${Math.max(MIN_HUMIDITY_MAX, (this.humidityMin ?? 0) + HUMIDITY_LIMIT_GAP)}
+                  .max=${MAX_HUMIDITY_MAX}
+                  .value=${ecoVal}
+                  @value-changed=${(e: CustomEvent<{ value: number | null }>) =>
+                    this._fireSensorChanged("eco_dehumidify", e.detail.value)}
+                ></rs-number-field>`
+        }
+        <rs-list-row
+          switch
+          wrap
+          .heading=${localize("schedule.preheat_label", l)}
+          .checked=${this.prehumidifyEnabled}
+          @toggle-changed=${(e: CustomEvent<boolean>) =>
+            this._fireSensorChanged("prehumidify_enabled", e.detail)}
+        ></rs-list-row>
+      </div>
+
+      <div class="group">
+        <h4 class="group-title">
+          ${localize("devices.setpoint_mode", l)}
+          <rs-info-icon .text=${localize("devices.setpoint_mode_info", l)}></rs-info-icon>
+        </h4>
+        ${this._choice(
+          localize("devices.setpoint_mode", l),
+          [
+            { value: "proportional", label: localize("devices.setpoint_mode_proportional", l) },
+            { value: "direct", label: localize("devices.setpoint_mode_direct", l) },
+          ],
+          spMode,
+          (v) => this._fireSensorChanged(spModeKey, v),
+        )}
+        ${
+          spMode === "direct"
+            ? html`<rs-number-field
+                .label=${localize("devices.setpoint_offset", l)}
+                .info=${localize("devices.setpoint_offset_info", l)}
+                suffix="%"
+                .min=${-20}
+                .max=${20}
+                .step=${1}
+                .value=${spOffset}
+                @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                  this._fireSensorChanged(spOffsetKey, e.detail.value)}
+              ></rs-number-field>`
+            : nothing
+        }
+      </div>
+
+      <div class="group">
+        <rs-list-row
+          class="remove"
+          clickable
+          variant="danger"
+          icon="mdi:minus-circle-outline"
+          .heading=${localize("detail.devices.remove", l)}
+          @row-click=${() => {
+            this._confirmRemove = entityId;
+          }}
+        ></rs-list-row>
+        <rs-confirm-dialog
+          .open=${this._confirmRemove === entityId}
+          icon="mdi:minus-circle-outline"
+          .heading=${localize("detail.devices.remove", l)}
+          .message=${localize("detail.devices.remove_confirm", l, { name: this._name(entityId) })}
+          .confirmLabel=${localize("detail.devices.remove_action", l)}
+          @cancel=${() => {
+            this._confirmRemove = "";
+          }}
+          @confirm=${() => this._removeHumidityDevice(role)}
+        ></rs-confirm-dialog>
+      </div>
+    `;
+  }
+
   private _openDetail(entityId: string) {
     this._selectedForEdit = entityId;
     this._confirmRemove = "";
@@ -1275,20 +1664,104 @@ export class RsDeviceSection extends LitElement {
     );
   }
 
+  private _fireSensorChanged(key: string, value: string | number | boolean | null) {
+    this.dispatchEvent(
+      new CustomEvent("sensor-changed", {
+        detail: { key, value },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  private _addHumidityDevice(entityId: string, role: "humidifier" | "dehumidifier") {
+    this._focusAdded = entityId;
+    const key = role === "humidifier" ? "humidifier_entity" : "dehumidifier_entity";
+    this._fireSensorChanged(key, entityId);
+    if (role === "humidifier" && this.humidityMin == null) {
+      this._fireSensorChanged(
+        "humidity_min",
+        Math.max(
+          MIN_HUMIDITY_MIN,
+          Math.min(DEFAULT_HUMIDITY_MIN, (this.humidityMax ?? 100) - HUMIDITY_LIMIT_GAP),
+        ),
+      );
+    } else if (role === "dehumidifier" && this.humidityMax == null) {
+      this._fireSensorChanged(
+        "humidity_max",
+        Math.min(
+          MAX_HUMIDITY_MAX,
+          Math.max(DEFAULT_HUMIDITY_MAX, (this.humidityMin ?? 0) + HUMIDITY_LIMIT_GAP),
+        ),
+      );
+    }
+    if (!this.humiditySensor) {
+      const areaHumSensor = getEntitiesForArea(
+        this.area.area_id,
+        this.hass?.entities,
+        this.hass?.devices,
+      )
+        .map((e) => e.entity_id)
+        .find(
+          (id) =>
+            id.startsWith("sensor.") &&
+            this.hass?.states?.[id]?.attributes?.device_class === "humidity",
+        );
+      if (areaHumSensor) {
+        this._fireSensorChanged("humidity_sensor", areaHumSensor);
+      }
+    }
+    this._selectedForEdit = entityId;
+    this._confirmRemove = "";
+    this._detailOpen = true;
+  }
+
+  private _removeHumidityDevice(role: "humidifier" | "dehumidifier") {
+    this._confirmRemove = "";
+    this._returnFocus = LIST_FOCUS;
+    const key = role === "humidifier" ? "humidifier_entity" : "dehumidifier_entity";
+    this._fireSensorChanged(key, "");
+  }
+
+  private _onHumidityDeviceRoleChange(
+    entityId: string,
+    oldRole: "humidifier" | "dehumidifier",
+    newRole: "humidifier" | "dehumidifier",
+  ) {
+    if (oldRole === newRole) return;
+    const oldKey = oldRole === "humidifier" ? "humidifier_entity" : "dehumidifier_entity";
+    this._fireSensorChanged(oldKey, "");
+    this._addHumidityDevice(entityId, newRole);
+  }
+
   private _entityFilter = (entity: { entity_id: string }): boolean => {
     const id = entity.entity_id;
     const idAfterDot = id.substring(id.indexOf(".") + 1);
     if (idAfterDot.startsWith("roommind_")) return false;
-    if (this.devices.some((d) => d.entity_id === id)) return false;
-    return id.startsWith("climate.");
+    if (this._allInRoomIds().has(id)) return false;
+    return (
+      id.startsWith("climate.") ||
+      id.startsWith("humidifier.") ||
+      id.startsWith("switch.") ||
+      id.startsWith("input_boolean.")
+    );
   };
 
   private _onEntityPicked(e: CustomEvent) {
     const entityId = e.detail?.value as string;
     const picker = e.target as HTMLElement & { value: string };
     picker.value = "";
-    if (!entityId || !entityId.startsWith("climate.")) return;
-    this._addDevice(entityId);
+    if (!entityId) return;
+    if (entityId.startsWith("climate.")) {
+      this._addDevice(entityId);
+    } else if (
+      entityId.startsWith("humidifier.") ||
+      entityId.startsWith("switch.") ||
+      entityId.startsWith("input_boolean.")
+    ) {
+      const role = this._detectHumidityRole(entityId);
+      this._addHumidityDevice(entityId, role);
+    }
   }
 }
 

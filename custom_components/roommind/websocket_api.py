@@ -22,6 +22,7 @@ from .const import (
     DOMAIN,
     HUMIDITY_DEVICE_DOMAINS,
     HUMIDITY_LIMIT_GAP,
+    HUMIDITY_MODES,
     MASTER_ENTITY_DOMAINS,
     MASTER_OFF_MODE_OFF,
     MASTER_OFF_MODES,
@@ -32,12 +33,14 @@ from .const import (
     MAX_MASTER_DELAY_S,
     MAX_MASTER_TEMPERATURE,
     MAX_PRICE_SHIFT_K,
+    MAX_TARGET_HUMIDITY,
     MAX_TARGET_TEMP,
     MIN_CO2_THRESHOLD,
     MIN_HUMIDITY_MAX,
     MIN_HUMIDITY_MIN,
     MIN_MASTER_TEMPERATURE,
     MIN_OCCUPANCY_ECO_DELAY_MINUTES,
+    MIN_TARGET_HUMIDITY,
     MIN_TARGET_TEMP,
     OVERRIDE_CUSTOM,
     OVERRIDE_TYPES,
@@ -47,6 +50,7 @@ from .const import (
     is_override_suppressed,
 )
 from .control.direct_valve import async_release_valve
+from .managers.heat_plant_manager import FUEL_TYPES, HEAT_PLANT_TYPES
 from .services.analytics_service import (
     _compute_target_forecast,  # noqa: F401 - re-exported for tests
     _csv_to_points,  # noqa: F401 - re-exported for tests
@@ -191,6 +195,18 @@ _ROOM_SAVE_FIELDS = (
     "ventilation_entity",
     "humidity_max",
     "humidity_min",
+    "humidity_mode",
+    "comfort_humidify",
+    "comfort_dehumidify",
+    "eco_humidify",
+    "eco_dehumidify",
+    "away_humidify",
+    "away_dehumidify",
+    "prehumidify_enabled",
+    "humidifier_setpoint_mode",
+    "humidifier_setpoint_offset",
+    "dehumidifier_setpoint_mode",
+    "dehumidifier_setpoint_offset",
     "dehumidifier_entity",
     "humidifier_entity",
     "solar_sensor",
@@ -201,6 +217,7 @@ _ROOM_SAVE_FIELDS = (
 
 # Same limits as the room climate entity; also turns away nan/inf
 _TARGET_TEMP = vol.All(vol.Coerce(float), vol.Range(min=MIN_TARGET_TEMP, max=MAX_TARGET_TEMP))
+_TARGET_HUMIDITY = vol.All(vol.Coerce(float), vol.Range(min=MIN_TARGET_HUMIDITY, max=MAX_TARGET_HUMIDITY))
 
 # What the dashboard card saves; the only room fields a non-admin may send
 _USER_ROOM_FIELDS = frozenset(
@@ -211,6 +228,13 @@ _USER_ROOM_FIELDS = frozenset(
         "comfort_cool",
         "eco_heat",
         "eco_cool",
+        "comfort_humidify",
+        "comfort_dehumidify",
+        "eco_humidify",
+        "eco_dehumidify",
+        "humidity_min",
+        "humidity_max",
+        "humidity_mode",
         "climate_mode",
         "climate_control_enabled",
     }
@@ -260,6 +284,7 @@ _SETTINGS_SAVE_FIELDS = (
     "group_by_floor",
     "floor_order",
     "compressor_groups",
+    "heat_plants",
 )
 
 
@@ -317,7 +342,12 @@ def _validate_humidity_control(
     device class is only checked for a field sent now, so a device that reports its class
     later never blocks other saves of the room.
     """
-    low, high = room.get("humidity_min"), room.get("humidity_max")
+    low = room.get("comfort_humidify") if "comfort_humidify" in changed else room.get("humidity_min")
+    if low is None:
+        low = room.get("comfort_humidify")
+    high = room.get("comfort_dehumidify") if "comfort_dehumidify" in changed else room.get("humidity_max")
+    if high is None:
+        high = room.get("comfort_dehumidify")
     if low is not None and high is not None and high - low < HUMIDITY_LIMIT_GAP:
         return (
             websocket_api.ERR_INVALID_FORMAT,
@@ -429,6 +459,15 @@ async def websocket_list_rooms(
             "dehumidifier_active": live.get("dehumidifier_active", False),
             "ac_dry_active": live.get("ac_dry_active", False),
             "humidifier_active": live.get("humidifier_active", False),
+            "humidify_target": live.get("humidify_target"),
+            "dehumidify_target": live.get("dehumidify_target"),
+            "target_humidity": live.get("target_humidity"),
+            "humidity_action": live.get("humidity_action", "idle"),
+            "humidifying_power": live.get("humidifying_power", 0),
+            "humidity_device_setpoint": live.get("humidity_device_setpoint"),
+            "humidity_mpc_active": live.get("humidity_mpc_active", False),
+            "humidity_confidence": live.get("humidity_confidence"),
+            "prehumidify": live.get("prehumidify", False),
             # Sun sensor (#303): kind (irradiance/illuminance/percent) and learning/active/unavailable/unsupported
             "solar_sensor": live.get("solar_sensor"),
             "mold_risk_level": live.get("mold_risk_level", "ok"),
@@ -509,6 +548,8 @@ async def websocket_list_rooms(
             ),
             "coil_dry_drain_minutes": settings.get("coil_dry_drain_minutes", DEFAULT_COIL_DRY_DRAIN_MINUTES),
             "compressor_groups": settings.get("compressor_groups", []),
+            "heat_plants": settings.get("heat_plants", []),
+            "heat_plants_live": coordinator.heat_plants_live if coordinator else {},
         },
     )
 
@@ -628,6 +669,22 @@ async def websocket_list_rooms(
         vol.Optional("humidity_min"): vol.Any(
             None, vol.All(vol.Coerce(float), vol.Range(min=MIN_HUMIDITY_MIN, max=MAX_HUMIDITY_MIN))
         ),
+        vol.Optional("humidity_mode"): vol.In(HUMIDITY_MODES),
+        vol.Optional("comfort_humidify"): vol.Any(
+            None, vol.All(vol.Coerce(float), vol.Range(min=MIN_HUMIDITY_MIN, max=MAX_HUMIDITY_MIN))
+        ),
+        vol.Optional("comfort_dehumidify"): vol.Any(
+            None, vol.All(vol.Coerce(float), vol.Range(min=MIN_HUMIDITY_MAX, max=MAX_HUMIDITY_MAX))
+        ),
+        vol.Optional("eco_humidify"): vol.Any(None, _TARGET_HUMIDITY),
+        vol.Optional("eco_dehumidify"): vol.Any(None, _TARGET_HUMIDITY),
+        vol.Optional("away_humidify"): vol.Any(None, _TARGET_HUMIDITY),
+        vol.Optional("away_dehumidify"): vol.Any(None, _TARGET_HUMIDITY),
+        vol.Optional("prehumidify_enabled"): bool,
+        vol.Optional("humidifier_setpoint_mode"): vol.In(["proportional", "direct"]),
+        vol.Optional("humidifier_setpoint_offset"): vol.All(vol.Coerce(float), vol.Range(min=-20.0, max=20.0)),
+        vol.Optional("dehumidifier_setpoint_mode"): vol.In(["proportional", "direct"]),
+        vol.Optional("dehumidifier_setpoint_offset"): vol.All(vol.Coerce(float), vol.Range(min=-20.0, max=20.0)),
         vol.Optional("dehumidifier_entity"): vol.Any(
             "", vol.All(str, vol.Match(rf"^({'|'.join(HUMIDITY_DEVICE_DOMAINS)})\.[a-z0-9_]+$"))
         ),
@@ -1054,6 +1111,42 @@ async def websocket_get_settings(
                 vol.Optional("off_mode", default=MASTER_OFF_MODE_OFF): vol.In(MASTER_OFF_MODES),
             }
         ],
+        vol.Optional("heat_plants"): [
+            {
+                vol.Required("id"): str,
+                vol.Required("name"): str,
+                vol.Optional("plant_type", default="coal_boiler"): vol.In(HEAT_PLANT_TYPES),
+                vol.Optional("enabled", default=True): bool,
+                vol.Optional("assigned_devices", default=[]): [str],
+                vol.Optional("assigned_rooms", default=[]): [str],
+                vol.Optional("source_entity", default=""): str,
+                vol.Optional("target_supply_temp", default=55.0): vol.Coerce(float),
+                vol.Optional("idle_supply_temp", default=35.0): vol.Coerce(float),
+                vol.Optional("off_mode", default="off"): vol.In(["off", "temperature"]),
+                vol.Optional("min_rooms_demand", default=1): vol.All(vol.Coerce(int), vol.Range(min=1, max=50)),
+                vol.Optional("supply_temp_sensor", default=""): str,
+                vol.Optional("return_temp_sensor", default=""): str,
+                vol.Optional("dhw_temp_sensor", default=""): str,
+                vol.Optional("flue_temp_sensor", default=""): str,
+                vol.Optional("ch_pump_entity", default=""): str,
+                vol.Optional("ch_pump_min_supply_temp", default=40.0): vol.Coerce(float),
+                vol.Optional("ch_pump_overrun_temp", default=80.0): vol.Coerce(float),
+                vol.Optional("dhw_pump_entity", default=""): str,
+                vol.Optional("dhw_target_temp", default=50.0): vol.Coerce(float),
+                vol.Optional("dhw_hysteresis", default=3.0): vol.Coerce(float),
+                vol.Optional("dhw_min_supply_delta", default=3.0): vol.Coerce(float),
+                vol.Optional("fuel_type", default="coal"): vol.In(FUEL_TYPES),
+                vol.Optional("calorific_value_mj_kg", default=26.0): vol.Coerce(float),
+                vol.Optional("calorific_value_kwh_m3", default=10.5): vol.Coerce(float),
+                vol.Optional("efficiency_pct", default=85.0): vol.Coerce(float),
+                vol.Optional("cop", default=3.5): vol.Coerce(float),
+                vol.Optional("nominal_power_kw", default=15.0): vol.Coerce(float),
+                vol.Optional("fuel_price", default=1500.0): vol.Coerce(float),
+                vol.Optional("currency", default="PLN"): str,
+                vol.Optional("energy_sensor", default=""): str,
+                vol.Optional("fuel_consumption_sensor", default=""): str,
+            }
+        ],
     }
 )
 @websocket_api.async_response
@@ -1151,7 +1244,7 @@ async def websocket_save_settings(
     settings = await store.async_save_settings(changes)
     connection.send_result(msg["id"], {"settings": settings})
     coordinator = _get_coordinator(hass)
-    if "climate_control_active" in changes and coordinator:
+    if ("climate_control_active" in changes or "heat_plants" in changes) and coordinator:
         # Stop or resume control now, which also updates switch.roommind_climate_control (#291).
         await coordinator.async_request_refresh()
 
@@ -1370,6 +1463,39 @@ async def websocket_covers_clear_override(
 # ---------------------------------------------------------------------------
 
 
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/heat_plants/reset_stats",
+        vol.Optional("plant_id"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_heat_plants_reset_stats(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Reset cumulative energy, fuel, and cost counters for a heat plant (or all)."""
+    store = hass.data[DOMAIN]["store"]
+    coordinator = _get_coordinator(hass)
+    plant_id = msg.get("plant_id")
+    if coordinator:
+        coordinator._heat_plant_manager.reset_stats(plant_id)
+        await store.async_save_settings(
+            {"heat_plant_state": coordinator._heat_plant_manager.get_state()}
+        )
+        await coordinator.async_request_refresh()
+    else:
+        saved = dict(store.get_settings().get("heat_plant_state", {}))
+        if plant_id:
+            saved.pop(plant_id, None)
+        else:
+            saved.clear()
+        await store.async_save_settings({"heat_plant_state": saved})
+    connection.send_result(msg["id"], {"success": True})
+
+
 @callback
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     """Register all RoomMind WebSocket commands."""
@@ -1386,3 +1512,4 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_boost_learning)
     websocket_api.async_register_command(hass, websocket_get_diagnostics)
     websocket_api.async_register_command(hass, websocket_covers_clear_override)
+    websocket_api.async_register_command(hass, websocket_heat_plants_reset_stats)

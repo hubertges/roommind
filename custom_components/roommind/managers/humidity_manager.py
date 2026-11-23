@@ -33,15 +33,41 @@ def _limit(value: Any) -> float | None:
 
 def humidity_limits(room: dict) -> tuple[float | None, float | None]:
     """The room's (lower, upper) humidity limit in % RH; None where not set."""
-    return _limit(room.get("humidity_min")), _limit(room.get("humidity_max"))
+    low = _limit(room.get("humidity_min"))
+    if low is None and room.get("humidity_min") is None and "humidity_min" not in room:
+        low = _limit(room.get("comfort_humidify"))
+    elif low is None and room.get("comfort_humidify") is not None and room.get("humidity_min") is not None:
+        low = _limit(room.get("comfort_humidify"))
+    elif low is None and room.get("comfort_humidify") is not None and "humidity_min" not in room:
+        low = _limit(room.get("comfort_humidify"))
+    high = _limit(room.get("humidity_max"))
+    if high is None and "humidity_max" not in room:
+        high = _limit(room.get("comfort_dehumidify"))
+    return low, high
 
 
 def humidity_regulated(room: dict) -> bool:
     """Whether RoomMind judges the room's humidity: a limit and a humidity sensor, not outdoor."""
+    has_limit = any(limit is not None for limit in humidity_limits(room)) or (
+        _limit(room.get("comfort_humidify")) is not None
+        or _limit(room.get("comfort_dehumidify")) is not None
+        or _limit(room.get("override_humidify")) is not None
+        or _limit(room.get("override_dehumidify")) is not None
+    )
+    if (
+        "humidity_max" in room
+        and room.get("humidity_max") is None
+        and "humidity_min" not in room
+        and room.get("comfort_dehumidify") is None
+        and room.get("comfort_humidify") is None
+        and room.get("override_humidify") is None
+        and room.get("override_dehumidify") is None
+    ):
+        has_limit = False
     return (
         bool(room.get("humidity_sensor"))
         and not room.get("is_outdoor", False)
-        and any(limit is not None for limit in humidity_limits(room))
+        and has_limit
     )
 
 
@@ -185,6 +211,14 @@ def humidity_device_claims(
             continue
         low, high = humidity_limits(room)
         rs = room_states.get(area_id) or {}
+        if rs.get("humidify_target") is not None:
+            low = _limit(rs.get("humidify_target"))
+        elif low is None:
+            low = _limit(room.get("comfort_humidify")) or _limit(room.get("override_humidify"))
+        if rs.get("dehumidify_target") is not None:
+            high = _limit(rs.get("dehumidify_target"))
+        elif high is None:
+            high = _limit(room.get("comfort_dehumidify")) or _limit(room.get("override_dehumidify"))
         dehum = room.get("dehumidifier_entity") or ""
         hum = room.get("humidifier_entity") or ""
         sides = (

@@ -105,6 +105,7 @@ class RoomMindStore:
         self._data: dict[str, dict] = {}
         self._settings: dict = {}
         self._thermal_data: dict = {}
+        self._humidity_model_data: dict = {}
 
     async def async_load(self) -> None:
         """Load room data from the HA store."""
@@ -116,6 +117,7 @@ class RoomMindStore:
 
         self._settings = stored.get("settings", {}) if stored else {}
         self._thermal_data = stored.get("thermal_data", {}) if stored else {}
+        self._humidity_model_data = stored.get("humidity_model_data", {}) if stored else {}
 
         # One-time migrations (combined into single pass + single save)
         device_migrated = 0
@@ -148,9 +150,15 @@ class RoomMindStore:
 
     async def _async_save(self) -> None:
         """Persist current room data to the HA store."""
-        await self._store.async_save(
-            {"rooms": self._data, "settings": self._settings, "thermal_data": self._thermal_data}
-        )
+        payload = {
+            "rooms": self._data,
+            "settings": self._settings,
+            "thermal_data": self._thermal_data,
+        }
+        humidity_data = getattr(self, "_humidity_model_data", None)
+        if humidity_data:
+            payload["humidity_model_data"] = humidity_data
+        await self._store.async_save(payload)
 
     def get_rooms(self) -> dict[str, dict]:
         """Return a deep copy of all rooms (with migration applied)."""
@@ -195,6 +203,22 @@ class RoomMindStore:
     async def async_clear_all_thermal_data(self) -> None:
         """Clear all thermal learning data."""
         self._thermal_data = {}
+        self._humidity_model_data = {}
+        await self._async_save()
+
+    def get_humidity_model_data(self) -> dict:
+        """Return a deep copy of humidity EKF learning data."""
+        return copy.deepcopy(dict(getattr(self, "_humidity_model_data", {})))
+
+    async def async_save_humidity_model_data(self, data: dict) -> None:
+        """Replace humidity learning data and persist."""
+        self._humidity_model_data = data
+        await self._async_save()
+
+    async def async_clear_humidity_model_data_room(self, area_id: str) -> None:
+        """Clear humidity learning data for a single room."""
+        if hasattr(self, "_humidity_model_data"):
+            self._humidity_model_data.pop(area_id, None)
         await self._async_save()
 
     @staticmethod
@@ -237,6 +261,15 @@ class RoomMindStore:
         if "eco_temp" in config and "eco_heat" not in config:
             existing["eco_heat"] = config["eco_temp"]
         _single_temps_to_cool_side(existing, config, existing.get("climate_mode", "auto"))
+        # Sync comfort_humidify <-> humidity_min and comfort_dehumidify <-> humidity_max
+        if "comfort_humidify" in config and "humidity_min" not in config:
+            existing["humidity_min"] = config["comfort_humidify"]
+        elif "humidity_min" in config and "comfort_humidify" not in config:
+            existing["comfort_humidify"] = config["humidity_min"]
+        if "comfort_dehumidify" in config and "humidity_max" not in config:
+            existing["humidity_max"] = config["comfort_dehumidify"]
+        elif "humidity_max" in config and "comfort_dehumidify" not in config:
+            existing["comfort_dehumidify"] = config["humidity_max"]
         # Directional device sync
         self._sync_devices(existing, config)
         return existing
@@ -307,8 +340,20 @@ class RoomMindStore:
             "voc_sensor": config.get("voc_sensor", ""),
             "voc_threshold": config.get("voc_threshold"),
             "ventilation_entity": config.get("ventilation_entity", ""),
-            "humidity_max": config.get("humidity_max"),
-            "humidity_min": config.get("humidity_min"),
+            "humidity_max": config.get("humidity_max", config.get("comfort_dehumidify")),
+            "humidity_min": config.get("humidity_min", config.get("comfort_humidify")),
+            "humidity_mode": config.get("humidity_mode", "auto"),
+            "comfort_humidify": config.get("comfort_humidify", config.get("humidity_min")),
+            "comfort_dehumidify": config.get("comfort_dehumidify", config.get("humidity_max")),
+            "eco_humidify": config.get("eco_humidify"),
+            "eco_dehumidify": config.get("eco_dehumidify"),
+            "away_humidify": config.get("away_humidify"),
+            "away_dehumidify": config.get("away_dehumidify"),
+            "prehumidify_enabled": config.get("prehumidify_enabled", True),
+            "humidifier_setpoint_mode": config.get("humidifier_setpoint_mode", "proportional"),
+            "humidifier_setpoint_offset": config.get("humidifier_setpoint_offset", 0.0),
+            "dehumidifier_setpoint_mode": config.get("dehumidifier_setpoint_mode", "proportional"),
+            "dehumidifier_setpoint_offset": config.get("dehumidifier_setpoint_offset", 0.0),
             "dehumidifier_entity": config.get("dehumidifier_entity", ""),
             "humidifier_entity": config.get("humidifier_entity", ""),
             "solar_sensor": config.get("solar_sensor", ""),

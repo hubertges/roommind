@@ -10,9 +10,11 @@ from custom_components.roommind.const import DOMAIN
 from custom_components.roommind.sensor import (
     RoomMindModeSensor,
     RoomMindTargetTemperatureSensor,
+    RoomMindTauronPriceSensor,
     _create_room_entities,
     async_setup_entry,
 )
+from custom_components.roommind.utils.price_utils import build_tauron_forecast, signal_from_state
 
 
 def _make_coordinator(rooms_data=None):
@@ -157,3 +159,52 @@ def test_deprecated_sensors_are_disabled_for_new_rooms():
     coordinator = _make_coordinator()
     assert RoomMindTargetTemperatureSensor(coordinator, "room_a").entity_registry_enabled_default is False
     assert RoomMindModeSensor(coordinator, "room_a").entity_registry_enabled_default is False
+
+
+@pytest.mark.asyncio
+async def test_setup_entry_creates_tauron_price_sensor_for_poland(hass, mock_config_entry, store):
+    """Tauron electricity price sensor is created automatically when HA is configured for Poland/PLN."""
+    await store.async_load()
+    hass.config.country = "PL"
+    hass.config.currency = "PLN"
+
+    coordinator = _make_coordinator()
+    hass.data[DOMAIN] = {
+        mock_config_entry.entry_id: coordinator,
+        "store": store,
+    }
+    add_entities = MagicMock()
+
+    await async_setup_entry(hass, mock_config_entry, add_entities)
+
+    add_entities.assert_called_once()
+    entities = add_entities.call_args[0][0]
+    assert len(entities) == 1
+    sensor = entities[0]
+    assert isinstance(sensor, RoomMindTauronPriceSensor)
+    assert sensor.entity_id == "sensor.roommind_tauron_electricity_price"
+    assert sensor.native_unit_of_measurement == "PLN/kWh"
+    assert isinstance(sensor.native_value, float)
+    attrs = sensor.extra_state_attributes
+    assert len(attrs["raw_today"]) == 24
+    assert len(attrs["raw_tomorrow"]) == 24
+    assert len(attrs["forecast"]) == 48
+
+    # Verify PriceManager / signal_from_state parses the Tauron forecast and detects cheap/expensive hours
+    import time
+
+    sig = signal_from_state("sensor", str(sensor.native_value), attrs, time.time())
+    assert sig is not None
+    assert sig.has_forecast is True
+
+
+def test_tauron_forecast_weekday_zones():
+    """Weekday off-peak hours (13:00-15:00, 22:00-06:00) have lower rate than peak hours."""
+    from datetime import UTC, datetime
+
+    # Wednesday 2026-11-25 10:00 UTC
+    ts = datetime(2026, 11, 25, 10, 0, tzinfo=UTC).timestamp()
+    data = build_tauron_forecast(now_ts=ts, tariff="G12w")
+    prices = {entry["price"] for entry in data["raw_today"]}
+    assert len(prices) == 2
+    assert min(prices) < max(prices)

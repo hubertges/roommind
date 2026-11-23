@@ -349,6 +349,7 @@ async def build_analytics_data(
 
     # Model info (only if estimator exists -- avoid auto-creating for unknown rooms)
     model_info: dict = {}
+    humidity_model_info: dict = {}
     mpc_active = False
     # The controller's path, which the prediction follows; differs from mpc_active only when
     # the outdoor limits close both sides (see is_mpc_active)
@@ -428,6 +429,21 @@ async def build_analytics_data(
                 ),
                 **_afterglow_figures(room_config, est, rc.Q_heat, check_acs_can_heat(hass, room_config)),
                 "backtest": backtest_figures,
+            }
+        h_mgr = getattr(coordinator, "_humidity_model_manager", None)
+        if h_mgr and area_id in h_mgr._estimators:
+            h_est = h_mgr._estimators[area_id]
+            h_rc = h_est.get_model()
+            live = coordinator.rooms.get(area_id, {})
+            humidity_model_info = {
+                "confidence": h_est.confidence,
+                "model": h_rc.to_dict(),
+                "n_samples": h_est._n_updates,
+                "n_observations": h_est._n_updates,
+                "n_humidifying": h_est._n_humidifying,
+                "n_dehumidifying": h_est._n_dehumidifying,
+                "applicable_modes": sorted(h_est._applicable_modes),
+                "mpc_active": bool(live.get("humidity_mpc_active", False)),
             }
 
     # Build merged forecast: same format as history points, on a shared 5-min grid
@@ -581,7 +597,7 @@ async def build_analytics_data(
             }
         )
 
-    return {
+    res_data = {
         "detail": detail,
         "history": history,
         "model": model_info,
@@ -590,6 +606,9 @@ async def build_analytics_data(
         "rhythm": rhythm,
         "price_unit": _price_unit(hass, settings),
     }
+    if humidity_model_info:
+        res_data["humidity_model"] = humidity_model_info
+    return res_data
 
 
 def _price_unit(hass: HomeAssistant, settings: dict) -> str:

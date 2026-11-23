@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from typing import Any
+
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -12,6 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import RoomMindCoordinator
 from .utils.area_utils import rooms_with_area
+from .utils.price_utils import build_tauron_forecast
 
 
 def _create_room_entities(coordinator: RoomMindCoordinator, area_id: str) -> list[SensorEntity]:
@@ -40,6 +43,8 @@ async def async_setup_entry(
     for area_id in rooms:
         entities.extend(_create_room_entities(coordinator, area_id))
         coordinator._entity_areas.add(area_id)
+    if getattr(hass.config, "country", None) == "PL" or getattr(hass.config, "currency", None) == "PLN":
+        entities.append(RoomMindTauronPriceSensor(coordinator))
     if entities:
         async_add_entities(entities)
 
@@ -102,3 +107,43 @@ class RoomMindModeSensor(_RoomMindBaseSensor):
             val = room.get("mode", "idle")
             return str(val) if val is not None else "idle"
         return "idle"
+
+
+class RoomMindTauronPriceSensor(CoordinatorEntity, SensorEntity):
+    """Tauron Polska Energia electricity price sensor with 48h forecast (PLN/kWh)."""
+
+    _attr_has_entity_name = False
+    _attr_icon = "mdi:transmission-tower"
+    _attr_native_unit_of_measurement = "PLN/kWh"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: RoomMindCoordinator, tariff: str = "G12w") -> None:
+        """Initialize the Tauron electricity price sensor."""
+        super().__init__(coordinator)
+        self._tariff = tariff
+        self._attr_unique_id = f"{DOMAIN}_tauron_electricity_price"
+        self._attr_name = "Tauron Cena Prądu"
+        self.entity_id = f"sensor.{DOMAIN}_tauron_electricity_price"
+
+    @property
+    def native_value(self) -> float:
+        """Return the current Tauron electricity rate in PLN/kWh."""
+        data = build_tauron_forecast(tariff=self._tariff)
+        return float(data["current_price"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return Tauron zone info and 48h hourly price forecast for PriceManager & MPC."""
+        data = build_tauron_forecast(tariff=self._tariff)
+        return {
+            "tariff": data["tariff"],
+            "zone": data["zone"],
+            "operator": data["operator"],
+            "region": data["region"],
+            "peak_rate_pln_kwh": data["peak_rate_pln_kwh"],
+            "offpeak_rate_pln_kwh": data["offpeak_rate_pln_kwh"],
+            "g11_rate_pln_kwh": data["g11_rate_pln_kwh"],
+            "raw_today": data["raw_today"],
+            "raw_tomorrow": data["raw_tomorrow"],
+            "forecast": data["forecast"],
+        }

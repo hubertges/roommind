@@ -115,6 +115,25 @@ const ROOM_FIELDS: [string, RoomFieldSync][] = [
   ["ventilation_entity", plain("_ventilationEntity", (c) => c?.ventilation_entity ?? "")],
   ["humidity_max", plain("_humidityMax", (c) => c?.humidity_max ?? null)],
   ["humidity_min", plain("_humidityMin", (c) => c?.humidity_min ?? null)],
+  ["eco_humidify", plain("_ecoHumidify", (c) => c?.eco_humidify ?? null)],
+  ["eco_dehumidify", plain("_ecoDehumidify", (c) => c?.eco_dehumidify ?? null)],
+  ["prehumidify_enabled", plain("_prehumidifyEnabled", (c) => c?.prehumidify_enabled ?? true)],
+  [
+    "humidifier_setpoint_mode",
+    plain("_humidifierSetpointMode", (c) => c?.humidifier_setpoint_mode ?? "proportional"),
+  ],
+  [
+    "humidifier_setpoint_offset",
+    plain("_humidifierSetpointOffset", (c) => c?.humidifier_setpoint_offset ?? 0),
+  ],
+  [
+    "dehumidifier_setpoint_mode",
+    plain("_dehumidifierSetpointMode", (c) => c?.dehumidifier_setpoint_mode ?? "proportional"),
+  ],
+  [
+    "dehumidifier_setpoint_offset",
+    plain("_dehumidifierSetpointOffset", (c) => c?.dehumidifier_setpoint_offset ?? 0),
+  ],
   ["dehumidifier_entity", plain("_dehumidifierEntity", (c) => c?.dehumidifier_entity ?? "")],
   ["humidifier_entity", plain("_humidifierEntity", (c) => c?.humidifier_entity ?? "")],
   ["solar_sensor", plain("_solarSensor", (c) => c?.solar_sensor ?? "")],
@@ -268,6 +287,13 @@ export class RsRoomDetail extends LitElement {
   @state() private _ventilationEntity = "";
   @state() private _humidityMax: number | null = null;
   @state() private _humidityMin: number | null = null;
+  @state() private _ecoHumidify: number | null = null;
+  @state() private _ecoDehumidify: number | null = null;
+  @state() private _prehumidifyEnabled = true;
+  @state() private _humidifierSetpointMode: "proportional" | "direct" = "proportional";
+  @state() private _humidifierSetpointOffset = 0;
+  @state() private _dehumidifierSetpointMode: "proportional" | "direct" = "proportional";
+  @state() private _dehumidifierSetpointOffset = 0;
   @state() private _dehumidifierEntity = "";
   @state() private _humidifierEntity = "";
   @state() private _solarSensor = "";
@@ -668,7 +694,10 @@ export class RsRoomDetail extends LitElement {
   private _renderSectionCards() {
     const l = this.hass.language;
     const live = this.config?.live;
-    const deviceCount = this._devices.length;
+    const deviceCount =
+      this._devices.length +
+      (this._humidifierEntity ? 1 : 0) +
+      (this._dehumidifierEntity ? 1 : 0);
     return html`
       <rs-list-card
         .heading=${localize("room.section.schedule", l)}
@@ -715,6 +744,19 @@ export class RsRoomDetail extends LitElement {
           .editing=${false}
           .devices=${this._devices}
           .selectedTempSensor=${this._selectedTempSensor}
+          .humiditySensor=${this._selectedHumiditySensor}
+          .humidifierEntity=${this._humidifierEntity}
+          .dehumidifierEntity=${this._dehumidifierEntity}
+          .humidityMin=${this._humidityMin}
+          .humidityMax=${this._humidityMax}
+          .ecoHumidify=${this._ecoHumidify}
+          .ecoDehumidify=${this._ecoDehumidify}
+          .prehumidifyEnabled=${this._prehumidifyEnabled}
+          .humidifierSetpointMode=${this._humidifierSetpointMode}
+          .humidifierSetpointOffset=${this._humidifierSetpointOffset}
+          .dehumidifierSetpointMode=${this._dehumidifierSetpointMode}
+          .dehumidifierSetpointOffset=${this._dehumidifierSetpointOffset}
+          .live=${live}
           .valveProtectionExclude=${this._valveProtectionExclude}
           .valveProtectionEnabled=${this.valveProtectionEnabled}
           .coilDryEnabledGlobal=${this.coilDryEnabled}
@@ -816,6 +858,13 @@ export class RsRoomDetail extends LitElement {
         .ventilationEntity=${this._ventilationEntity}
         .humidityMax=${this._humidityMax}
         .humidityMin=${this._humidityMin}
+        .ecoHumidify=${this._ecoHumidify}
+        .ecoDehumidify=${this._ecoDehumidify}
+        .prehumidifyEnabled=${this._prehumidifyEnabled}
+        .humidifierSetpointMode=${this._humidifierSetpointMode}
+        .humidifierSetpointOffset=${this._humidifierSetpointOffset}
+        .dehumidifierSetpointMode=${this._dehumidifierSetpointMode}
+        .dehumidifierSetpointOffset=${this._dehumidifierSetpointOffset}
         .dehumidifierEntity=${this._dehumidifierEntity}
         .humidifierEntity=${this._humidifierEntity}
         .solarSensor=${this._solarSensor}
@@ -994,6 +1043,19 @@ export class RsRoomDetail extends LitElement {
             .focusEntity=${this._focusDevice}
             .devices=${this._devices}
             .selectedTempSensor=${this._selectedTempSensor}
+            .humiditySensor=${this._selectedHumiditySensor}
+            .humidifierEntity=${this._humidifierEntity}
+            .dehumidifierEntity=${this._dehumidifierEntity}
+            .humidityMin=${this._humidityMin}
+            .humidityMax=${this._humidityMax}
+            .ecoHumidify=${this._ecoHumidify}
+            .ecoDehumidify=${this._ecoDehumidify}
+            .prehumidifyEnabled=${this._prehumidifyEnabled}
+            .humidifierSetpointMode=${this._humidifierSetpointMode}
+            .humidifierSetpointOffset=${this._humidifierSetpointOffset}
+            .dehumidifierSetpointMode=${this._dehumidifierSetpointMode}
+            .dehumidifierSetpointOffset=${this._dehumidifierSetpointOffset}
+            .live=${this.config?.live}
             .valveProtectionExclude=${this._valveProtectionExclude}
             .valveProtectionEnabled=${this.valveProtectionEnabled}
             .coilDryEnabledGlobal=${this.coilDryEnabled}
@@ -1001,6 +1063,7 @@ export class RsRoomDetail extends LitElement {
             .coilDryModeGlobal=${this.coilDryMode}
             .coilDryFanModeGlobal=${this.coilDryFanMode}
             @device-changed=${this._onDeviceChanged}
+            @sensor-changed=${this._onSensorChanged}
             @valve-protection-exclude-toggle=${this._onValveProtectionExcludeToggle}
           ></rs-device-section>
         </rs-edit-dialog>`;
@@ -1382,6 +1445,20 @@ export class RsRoomDetail extends LitElement {
       this._humidityMax = value as number | null;
     } else if (key === "humidity_min") {
       this._humidityMin = value as number | null;
+    } else if (key === "eco_humidify") {
+      this._ecoHumidify = value as number | null;
+    } else if (key === "eco_dehumidify") {
+      this._ecoDehumidify = value as number | null;
+    } else if (key === "prehumidify_enabled") {
+      this._prehumidifyEnabled = value as boolean;
+    } else if (key === "humidifier_setpoint_mode") {
+      this._humidifierSetpointMode = value as "proportional" | "direct";
+    } else if (key === "humidifier_setpoint_offset") {
+      this._humidifierSetpointOffset = value as number;
+    } else if (key === "dehumidifier_setpoint_mode") {
+      this._dehumidifierSetpointMode = value as "proportional" | "direct";
+    } else if (key === "dehumidifier_setpoint_offset") {
+      this._dehumidifierSetpointOffset = value as number;
     } else if (key === "dehumidifier_entity") {
       this._dehumidifierEntity = value as string;
     } else if (key === "humidifier_entity") {

@@ -2,6 +2,8 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type {
   HomeAssistant,
+  HeatPlantConfig,
+  HeatPlantLive,
   PriceStatus,
   RoomConfig,
   RoomWithoutArea,
@@ -22,6 +24,7 @@ import {
 } from "./components/settings/settings-categories";
 import "./components/rs-settings";
 import "./components/rs-analytics";
+import "./components/rs-heat-plants";
 import "./components/dashboard/rs-dashboard";
 import "./components/dashboard/rs-dashboard-edit";
 import "./components/schedule/rs-schedule-editor";
@@ -29,7 +32,7 @@ import "./components/schedule/rs-schedule-overview";
 import type { RsScheduleEditor } from "./components/schedule/rs-schedule-editor";
 import "./components/shared/rs-icon-button";
 
-type TabId = "areas" | "analytics" | "schedules" | "settings";
+type TabId = "areas" | "heat_plants" | "analytics" | "schedules" | "settings";
 
 /** Panel width from which settings show list and panel side by side (design system). */
 const SETTINGS_WIDE_MIN = 900;
@@ -59,6 +62,8 @@ export class RoomMindPanel extends LitElement {
   @state() private _activeTab: TabId = "areas";
   @state() private _rooms: Record<string, RoomConfig> = {};
   @state() private _roomsWithoutArea: RoomWithoutArea[] = [];
+  @state() private _heatPlants: HeatPlantConfig[] = [];
+  @state() private _heatPlantsLive: Record<string, HeatPlantLive> = {};
   @state() private _roomsLoaded = false;
   /** First rooms/list failed: shown instead of the dashboard until a load succeeds. */
   @state() private _roomsError = "";
@@ -360,6 +365,7 @@ export class RoomMindPanel extends LitElement {
 
     const tabLabels: Record<TabId, string> = {
       areas: localize("panel.tab.rooms", l),
+      heat_plants: l.toLowerCase().startsWith("pl") ? "Źródła ciepła" : "Heat Sources",
       analytics: localize("tabs.analytics", l),
       schedules: localize("panel.tab.schedules", l),
       settings: localize("panel.tab.settings", l),
@@ -497,6 +503,14 @@ export class RoomMindPanel extends LitElement {
     switch (this._activeTab) {
       case "areas":
         return this._renderAreas();
+      case "heat_plants":
+        return html`<rs-heat-plants
+          .hass=${this.hass}
+          .rooms=${this._rooms}
+          .heatPlants=${this._heatPlants}
+          .heatPlantsLive=${this._heatPlantsLive}
+          @heat-plants-updated=${this._onRoomUpdated}
+        ></rs-heat-plants>`;
       case "analytics":
         return html`<rs-analytics
           .hass=${this.hass}
@@ -706,6 +720,8 @@ export class RoomMindPanel extends LitElement {
         coil_dry_minutes: number;
         coil_dry_mode: string;
         coil_dry_fan_mode: string;
+        heat_plants?: HeatPlantConfig[];
+        heat_plants_live?: Record<string, HeatPlantLive>;
         server_time?: number;
       }>({
         type: "roommind/rooms/list",
@@ -715,6 +731,8 @@ export class RoomMindPanel extends LitElement {
       noteServerTime(result.server_time);
       this._rooms = result.rooms;
       this._roomsWithoutArea = result.rooms_without_area ?? [];
+      this._heatPlants = result.heat_plants ?? [];
+      this._heatPlantsLive = result.heat_plants_live ?? {};
       this._vacationActive = result.vacation_active ?? false;
       this._vacationTemp = result.vacation_temp ?? null;
       this._vacationUntil = result.vacation_until ?? null;
@@ -1038,6 +1056,9 @@ export class RoomMindPanel extends LitElement {
       this._activeTab = this._scheduleRoom ? "areas" : "schedules";
     } else if (path === "/schedules") {
       this._activeTab = "schedules";
+      this._selectedAreaId = null;
+    } else if (path === "/heat_plants") {
+      this._activeTab = "heat_plants";
       this._selectedAreaId = null;
     } else if (path.startsWith("/room/")) {
       this._activeTab = "areas";

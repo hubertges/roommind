@@ -514,12 +514,22 @@ export class RsRoomHero extends LitElement {
     const unit = tempUnit(this.hass);
     const facts = [];
     if (live.current_humidity != null) {
+      const humTarget =
+        live.humidify_target != null && live.dehumidify_target != null
+          ? ` (${formatPercent(live.humidify_target, this.hass)}–${formatPercent(live.dehumidify_target, this.hass)})`
+          : live.target_humidity != null
+            ? ` (→ ${formatPercent(live.target_humidity, this.hass)})`
+            : "";
+      const humMpc =
+        live.humidity_mpc_active && live.humidifying_power
+          ? ` · MPC ${formatPercent(live.humidifying_power, this.hass)}`
+          : "";
       facts.push(
         html`<span
           ><ha-icon icon="mdi:water-percent" aria-hidden="true"></ha-icon>${localize(
             "detail.hero.humidity",
             l,
-            { value: formatPercent(live.current_humidity, this.hass) },
+            { value: `${formatPercent(live.current_humidity, this.hass)}${humTarget}${humMpc}` },
           )}</span
         >`,
       );

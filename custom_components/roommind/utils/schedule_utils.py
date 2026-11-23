@@ -17,15 +17,26 @@ from ..const import (
     CLIMATE_MODE_COOL_ONLY,
     CLIMATE_MODE_HEAT_ONLY,
     DEFAULT_COMFORT_COOL,
+    DEFAULT_COMFORT_DEHUMIDIFY,
     DEFAULT_COMFORT_HEAT,
+    DEFAULT_COMFORT_HUMIDIFY,
     DEFAULT_ECO_COOL,
+    DEFAULT_ECO_DEHUMIDIFY,
     DEFAULT_ECO_HEAT,
+    DEFAULT_ECO_HUMIDIFY,
+    HUMIDITY_LIMIT_GAP,
+    HUMIDITY_MODE_DEHUMIDIFY_ONLY,
+    HUMIDITY_MODE_HUMIDIFY_ONLY,
+    MAX_TARGET_HUMIDITY,
     MAX_TARGET_TEMP,
+    MIN_TARGET_HUMIDITY,
     MIN_TARGET_TEMP,
     OVERRIDE_BOOST,
     OVERRIDE_ECO,
     SCHEDULE_UNREADABLE_HOLD_HOURS,
+    TargetHumidities,
     TargetTemps,
+    is_humidity_override_active,
     is_override_active,
 )
 from .price_utils import PriceSignal, apply_price_shift
@@ -664,6 +675,297 @@ def make_target_resolver(
                 targets.cool,
                 climate_mode,
             )
+        )
+
+    return resolver
+
+
+def sanitize_block_humidity(raw: Any) -> float | None:
+    """Convert a schedule block humidity to % RH, or None if unusable."""
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        return None
+    if not MIN_TARGET_HUMIDITY <= val <= MAX_TARGET_HUMIDITY:
+        return None
+    return val
+
+
+def room_configured_humidity_targets(
+    room: dict,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Return (comfort_humidify, comfort_dehumidify, eco_humidify, eco_dehumidify) for a room.
+
+    Falls back to ``humidity_min`` and ``humidity_max`` so rooms configured with
+    limit sliders work seamlessly with schedule and MPC resolution.
+    If neither comfort targets nor limits are configured, returns (None, None, None, None).
+    """
+    c_hum = room.get("comfort_humidify")
+    if c_hum is None:
+        c_hum = room.get("humidity_min")
+    c_dehum = room.get("comfort_dehumidify")
+    if c_dehum is None:
+        c_dehum = room.get("humidity_max")
+
+    e_hum = room.get("eco_humidify")
+    if e_hum is None and c_hum is not None:
+        e_hum = c_hum
+    e_dehum = room.get("eco_dehumidify")
+    if e_dehum is None and c_dehum is not None:
+        e_dehum = c_dehum
+
+    humidity_mode = room.get("humidity_mode", "auto")
+    if humidity_mode == HUMIDITY_MODE_HUMIDIFY_ONLY:
+        c_dehum = None
+        e_dehum = None
+    elif humidity_mode == HUMIDITY_MODE_DEHUMIDIFY_ONLY:
+        c_hum = None
+        e_hum = None
+
+    return (
+        float(c_hum) if isinstance(c_hum, (int, float)) else None,
+        float(c_dehum) if isinstance(c_dehum, (int, float)) else None,
+        float(e_hum) if isinstance(e_hum, (int, float)) else None,
+        float(e_dehum) if isinstance(e_dehum, (int, float)) else None,
+    )
+
+
+def humidity_override_preset_band(room: dict, override_type: str) -> tuple[float, float]:
+    """Return the (humidify, dehumidify) band a boost/eco override stands for."""
+    c_hum, c_dehum, e_hum, e_dehum = room_configured_humidity_targets(room)
+    if override_type == OVERRIDE_ECO:
+        return (
+            e_hum if e_hum is not None else DEFAULT_ECO_HUMIDIFY,
+            e_dehum if e_dehum is not None else DEFAULT_ECO_DEHUMIDIFY,
+        )
+    return (
+        c_hum if c_hum is not None else DEFAULT_COMFORT_HUMIDIFY,
+        c_dehum if c_dehum is not None else DEFAULT_COMFORT_DEHUMIDIFY,
+    )
+
+
+def mask_humidity_override_band(
+    humidify: float | None,
+    dehumidify: float | None,
+    humidity_mode: str,
+) -> tuple[float | None, float | None]:
+    """Drop the side a humidify_only/dehumidify_only room cannot act on."""
+    if humidity_mode == HUMIDITY_MODE_HUMIDIFY_ONLY:
+        return humidify, None
+    if humidity_mode == HUMIDITY_MODE_DEHUMIDIFY_ONLY:
+        return None, dehumidify
+    return humidify, dehumidify
+
+
+def humidity_band_in_force(room: dict, live: dict) -> tuple[float | None, float | None]:
+    """The (humidify, dehumidify) band a room is held at."""
+    if is_humidity_override_active(room):
+        return room.get("override_humidify"), room.get("override_dehumidify")
+    hum = live.get("humidify_target")
+    dehum = live.get("dehumidify_target")
+    if hum is None and dehum is None:
+        c_hum, c_dehum, _, _ = room_configured_humidity_targets(room)
+        if c_hum is not None or c_dehum is not None:
+            return c_hum, c_dehum
+        return humidity_override_preset_band(room, OVERRIDE_BOOST)
+    return hum, dehum
+
+
+def set_humidity_band_sides(
+    band: tuple[float | None, float | None],
+    humidify: float | None,
+    dehumidify: float | None,
+    humidity_mode: str,
+) -> tuple[float | None, float | None] | None:
+    """Update *band* with the given sides (% RH, None = unchanged) within target bounds."""
+    cur_hum, cur_dehum = mask_humidity_override_band(*band, humidity_mode)
+    humidify, dehumidify = mask_humidity_override_band(humidify, dehumidify, humidity_mode)
+    if humidify is None and dehumidify is None:
+        return None
+
+    def bounded(value: float) -> float:
+        return round(min(MAX_TARGET_HUMIDITY, max(MIN_TARGET_HUMIDITY, value)), 1)
+
+    if humidify is not None:
+        cur_hum = bounded(humidify)
+        if dehumidify is None and cur_dehum is not None and cur_dehum < cur_hum + HUMIDITY_LIMIT_GAP:
+            cur_dehum = bounded(cur_hum + HUMIDITY_LIMIT_GAP)
+    if dehumidify is not None:
+        cur_dehum = bounded(dehumidify)
+        if cur_hum is not None and cur_dehum < cur_hum + HUMIDITY_LIMIT_GAP:
+            cur_hum = bounded(cur_dehum - HUMIDITY_LIMIT_GAP)
+    return cur_hum, cur_dehum
+
+
+def cap_humidity_to_eco(
+    targets: TargetHumidities,
+    eco_humidify: float | None,
+    eco_dehumidify: float | None,
+) -> TargetHumidities:
+    """Lower the demand of *targets* to at most eco."""
+    hum = targets.humidify
+    if hum is not None and eco_humidify is not None:
+        hum = min(hum, eco_humidify)
+    dehum = targets.dehumidify
+    if dehum is not None and eco_dehumidify is not None:
+        dehum = max(dehum, eco_dehumidify)
+    return TargetHumidities(humidify=hum, dehumidify=dehum)
+
+
+def _schedule_humidity_targets_at_time(
+    ts: float,
+    schedule_blocks: dict | None,
+    comfort_humidify: float | None,
+    comfort_dehumidify: float | None,
+    eco_humidify: float | None,
+    eco_dehumidify: float | None,
+    schedule_off_action: str,
+) -> TargetHumidities:
+    if comfort_humidify is None and comfort_dehumidify is None:
+        return TargetHumidities(humidify=None, dehumidify=None)
+    if schedule_blocks is None:
+        return TargetHumidities(humidify=comfort_humidify, dehumidify=comfort_dehumidify)
+    data = find_active_block(schedule_blocks, ts)
+    if data is not None:
+        hum_raw = data.get("humidify_humidity")
+        dehum_raw = data.get("dehumidify_humidity")
+        if hum_raw is not None or dehum_raw is not None:
+            h = comfort_humidify
+            d = comfort_dehumidify
+            if hum_raw is not None and comfort_humidify is not None:
+                val = sanitize_block_humidity(hum_raw)
+                if val is not None:
+                    h = val
+            if dehum_raw is not None and comfort_dehumidify is not None:
+                val = sanitize_block_humidity(dehum_raw)
+                if val is not None:
+                    d = val
+            return TargetHumidities(humidify=h, dehumidify=d)
+        single_raw = data.get("humidity")
+        if single_raw is not None:
+            single = sanitize_block_humidity(single_raw)
+            if single is not None:
+                return TargetHumidities(
+                    humidify=single if comfort_humidify is not None else None,
+                    dehumidify=(
+                        max(single + HUMIDITY_LIMIT_GAP, comfort_dehumidify)
+                        if comfort_dehumidify is not None
+                        else None
+                    ),
+                )
+        return TargetHumidities(humidify=comfort_humidify, dehumidify=comfort_dehumidify)
+    if schedule_off_action == "off":
+        return TargetHumidities(humidify=None, dehumidify=None)
+    return TargetHumidities(humidify=eco_humidify, dehumidify=eco_dehumidify)
+
+
+def resolve_humidity_targets_at_time(
+    ts: float,
+    schedule_blocks: dict | None,
+    override_until: float | None,
+    override_humidify: float | None,
+    override_dehumidify: float | None,
+    comfort_humidify: float | None,
+    comfort_dehumidify: float | None,
+    eco_humidify: float | None,
+    eco_dehumidify: float | None,
+    presence_away: bool = False,
+    presence_away_action: str = "eco",
+    schedule_off_action: str = "eco",
+    presence_clears_override: bool = False,
+    room_vacant: bool = False,
+    away_humidify: float | None = None,
+    away_dehumidify: float | None = None,
+) -> TargetHumidities:
+    """Resolve dual humidify/dehumidify target humidities at a specific timestamp."""
+    if (override_humidify is not None or override_dehumidify is not None) and (
+        override_until is None or ts < override_until
+    ):
+        if not (presence_away and presence_clears_override):
+            return TargetHumidities(
+                humidify=override_humidify,
+                dehumidify=override_dehumidify,
+            )
+
+    if comfort_humidify is None and comfort_dehumidify is None:
+        return TargetHumidities(humidify=None, dehumidify=None)
+
+    def at_home() -> TargetHumidities:
+        targets = _schedule_humidity_targets_at_time(
+            ts,
+            schedule_blocks,
+            comfort_humidify,
+            comfort_dehumidify,
+            eco_humidify,
+            eco_dehumidify,
+            schedule_off_action,
+        )
+        return (
+            cap_humidity_to_eco(targets, eco_humidify, eco_dehumidify)
+            if room_vacant
+            else targets
+        )
+
+    if presence_away:
+        if presence_away_action == "off":
+            # Only turn off humidifying when away; building protection (dehumidifying)
+            # uses eco_dehumidify if configured.
+            return TargetHumidities(humidify=None, dehumidify=eco_dehumidify)
+        if presence_away_action == "away":
+            sched = at_home()
+            h = (
+                min(float(away_humidify), sched.humidify)
+                if away_humidify is not None and sched.humidify is not None
+                else eco_humidify
+            )
+            d = (
+                max(float(away_dehumidify), sched.dehumidify)
+                if away_dehumidify is not None and sched.dehumidify is not None
+                else eco_dehumidify
+            )
+            return TargetHumidities(humidify=h, dehumidify=d)
+        return TargetHumidities(humidify=eco_humidify, dehumidify=eco_dehumidify)
+
+    return at_home()
+
+
+def make_humidity_target_resolver(
+    schedule_blocks: dict | None,
+    room: dict,
+    settings: dict,
+    presence_away: bool = False,
+    room_vacant: bool = False,
+) -> Callable[[float], TargetHumidities]:
+    """Create a sync humidity target resolver function (schedule blocks pre-fetched)."""
+    c_hum, c_dehum, e_hum, e_dehum = room_configured_humidity_targets(room)
+    override_until = room.get(
+        "override_humidity_until",
+        room.get("override_until"),
+    )
+    override_hum = room.get("override_humidify")
+    override_dehum = room.get("override_dehumidify")
+    presence_away_action = settings.get("presence_away_action", "eco")
+    schedule_off_action = settings.get("schedule_off_action", "eco")
+    presence_clears_override = bool(settings.get("presence_clears_override", False))
+
+    def resolver(ts: float) -> TargetHumidities:
+        return resolve_humidity_targets_at_time(
+            ts,
+            schedule_blocks,
+            override_until,
+            override_hum,
+            override_dehum,
+            c_hum,
+            c_dehum,
+            e_hum,
+            e_dehum,
+            presence_away=presence_away,
+            presence_away_action=presence_away_action,
+            schedule_off_action=schedule_off_action,
+            presence_clears_override=presence_clears_override,
+            room_vacant=room_vacant,
+            away_humidify=room.get("away_humidify"),
+            away_dehumidify=room.get("away_dehumidify"),
         )
 
     return resolver

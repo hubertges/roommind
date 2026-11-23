@@ -97,7 +97,9 @@ export function hasDevices(config: RoomConfig | null | undefined): boolean {
   return (
     (config?.devices?.length ?? 0) > 0 ||
     (config?.thermostats?.length ?? 0) > 0 ||
-    (config?.acs?.length ?? 0) > 0
+    (config?.acs?.length ?? 0) > 0 ||
+    !!config?.humidifier_entity ||
+    !!config?.dehumidifier_entity
   );
 }
 

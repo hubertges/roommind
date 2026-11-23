@@ -10,13 +10,19 @@ DOMAIN = "roommind"
 VERSION = "2.0.1"
 
 # Platforms
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE, Platform.HUMIDIFIER]
 
 # Climate modes
 CLIMATE_MODE_AUTO = "auto"
 CLIMATE_MODE_HEAT_ONLY = "heat_only"
 CLIMATE_MODE_COOL_ONLY = "cool_only"
 CLIMATE_MODES = [CLIMATE_MODE_AUTO, CLIMATE_MODE_HEAT_ONLY, CLIMATE_MODE_COOL_ONLY]
+
+# Humidity modes
+HUMIDITY_MODE_AUTO = "auto"
+HUMIDITY_MODE_HUMIDIFY_ONLY = "humidify_only"
+HUMIDITY_MODE_DEHUMIDIFY_ONLY = "dehumidify_only"
+HUMIDITY_MODES = [HUMIDITY_MODE_AUTO, HUMIDITY_MODE_HUMIDIFY_ONLY, HUMIDITY_MODE_DEHUMIDIFY_ONLY]
 
 # Override types
 OVERRIDE_BOOST = "boost"
@@ -35,6 +41,10 @@ MODE_IDLE = "idle"
 MODE_HEATING = "heating"
 MODE_COOLING = "cooling"
 
+# Room humidity modes
+MODE_HUMIDIFYING = "humidifying"
+MODE_DEHUMIDIFYING = "dehumidifying"
+
 # Global control strategy (settings["control_mode"]). Missing value = MPC, which
 # is what every install ran before the setting was read by the controller.
 CONTROL_MODE_MPC = "mpc"
@@ -52,6 +62,20 @@ DEFAULT_ECO_TEMP = 17.0
 DEFAULT_COMFORT_HEAT = 21.0
 DEFAULT_COMFORT_COOL = 24.0
 DEFAULT_ECO_HEAT = 17.0
+
+# Split humidify/dehumidify defaults (% RH)
+DEFAULT_COMFORT_HUMIDIFY = 45.0
+DEFAULT_COMFORT_DEHUMIDIFY = 60.0
+DEFAULT_ECO_HUMIDIFY = 40.0
+DEFAULT_ECO_DEHUMIDIFY = 65.0
+MIN_TARGET_HUMIDITY = 15.0
+MAX_TARGET_HUMIDITY = 90.0
+BANGBANG_HUMIDIFY_HYSTERESIS = 2.0  # % RH below target -> start humidifying
+BANGBANG_DEHUMIDIFY_HYSTERESIS = 2.0  # % RH above target -> start dehumidifying
+HUMIDIFYING_BOOST_TARGET = 80.0  # Fallback humidifier boost target (% RH)
+DEHUMIDIFYING_BOOST_TARGET = 30.0  # Fallback dehumidifier boost target (% RH)
+PROPORTIONAL_DEADBAND_RH = 2.0  # Minimum proportional setpoint change (% RH) to resend
+PROPORTIONAL_DEADBAND_NEAR_TARGET_RH = 1.0  # Finer proportional deadband (% RH) within 3% of target
 
 # What set a room's targets, recorded with the history for the analytics chart; "" = schedule
 TARGET_REASON_OVERRIDE = "override"
@@ -147,6 +171,13 @@ class TargetTemps(NamedTuple):
 
     heat: float | None = None  # None = don't heat / force off
     cool: float | None = None  # None = don't cool / force off
+
+
+class TargetHumidities(NamedTuple):
+    """Dual-target relative humidities (% RH) for humidifying and dehumidifying."""
+
+    humidify: float | None = None  # None = don't humidify / force off
+    dehumidify: float | None = None  # None = don't dehumidify / force off
 
 
 # Plausibility bounds for resolved room target temperatures (°C).
@@ -445,6 +476,14 @@ def is_override_active(room: dict) -> bool:
     return override_until is None or time.time() < override_until
 
 
+def is_humidity_override_active(room: dict) -> bool:
+    """Return True when a manual humidity override is currently active."""
+    if room.get("override_humidify") is None and room.get("override_dehumidify") is None:
+        return False
+    override_until = room.get("override_humidity_until")
+    return override_until is None or time.time() < override_until
+
+
 def is_override_suppressed(room: dict, settings: dict, presence_away: bool) -> bool:
     """Return True when an active override should be ignored due to presence."""
     if not presence_away:
@@ -463,7 +502,8 @@ def build_override_live(room: dict, suppressed: bool = False) -> dict:
     "paused" indicator.
     """
     active = is_override_active(room)
-    return {
+    hum_active = is_humidity_override_active(room)
+    res = {
         "override_active": active,
         "override_type": room.get("override_type") if active else None,
         "override_heat": room.get("override_heat") if active else None,
@@ -471,3 +511,15 @@ def build_override_live(room: dict, suppressed: bool = False) -> dict:
         "override_until": room.get("override_until") if active else None,
         "override_suppressed": active and suppressed,
     }
+    if hum_active:
+        res.update(
+            {
+                "override_humidity_active": True,
+                "override_humidity_type": room.get("override_humidity_type"),
+                "override_humidify": room.get("override_humidify"),
+                "override_dehumidify": room.get("override_dehumidify"),
+                "override_humidity_until": room.get("override_humidity_until"),
+                "override_humidity_suppressed": suppressed,
+            }
+        )
+    return res
