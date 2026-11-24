@@ -153,7 +153,43 @@ def _csv_to_points(rows: list[dict]) -> list[dict]:
                 "room_temp_max": _safe_float(row.get("room_temp_max", "")),
                 "room_temp_min": _safe_float(row.get("room_temp_min", "")),
                 "co2": _safe_float(row.get("co2", "")),
+                "pm25": _safe_float(row.get("pm25", "")),
+                "pm10": _safe_float(row.get("pm10", "")),
+                "humidity_action": row.get("humidity_action", ""),
+                "humidify_target": _safe_float(row.get("humidify_target", "")),
+                "dehumidify_target": _safe_float(row.get("dehumidify_target", "")),
+                "humidifying_power": _safe_float(row.get("humidifying_power", "")),
+                "humidify_starts": _safe_int(row.get("humidify_starts", "")),
+                "dehumidify_starts": _safe_int(row.get("dehumidify_starts", "")),
                 **{f: _safe_float(row.get(f, "")) for f in MODEL_INPUT_FIELDS},
+            }
+        )
+    return result
+
+
+def _plant_csv_to_points(rows: list[dict]) -> list[dict]:
+    """Convert heat plant CSV rows into typed analytics series points."""
+    result = []
+    for row in rows:
+        ts = _safe_float(row.get("timestamp", ""))
+        if ts is None:
+            continue
+        result.append(
+            {
+                "ts": ts,
+                "state": row.get("state", ""),
+                "supply_temp": _safe_float(row.get("supply_temp", "")),
+                "return_temp": _safe_float(row.get("return_temp", "")),
+                "dhw_temp": _safe_float(row.get("dhw_temp", "")),
+                "flue_temp": _safe_float(row.get("flue_temp", "")),
+                "delta_t": _safe_float(row.get("delta_t", "")),
+                "thermal_kw": _safe_float(row.get("thermal_kw", "")),
+                "burn_rate_per_h": _safe_float(row.get("burn_rate_per_h", "")),
+                "fuel_consumed_today": _safe_float(row.get("fuel_consumed_today", "")),
+                "fuel_remaining_kg": _safe_float(row.get("fuel_remaining_kg", "")),
+                "cost_today": _safe_float(row.get("cost_today", "")),
+                "ch_pump_active": row.get("ch_pump_active", "") in ("True", "true", "1"),
+                "dhw_pump_active": row.get("dhw_pump_active", "") in ("True", "true", "1"),
             }
         )
     return result
@@ -329,7 +365,14 @@ async def build_analytics_data(
             point["predicted_temp"] = None
     # Only the figures need the run starts, bucket extremes and model inputs; 90 days of points would carry them
     for point in history + detail:
-        del point["heat_starts"], point["cool_starts"], point["room_temp_max"], point["room_temp_min"]
+        del (
+            point["heat_starts"],
+            point["cool_starts"],
+            point["humidify_starts"],
+            point["dehumidify_starts"],
+            point["room_temp_max"],
+            point["room_temp_min"],
+        )
         for f in MODEL_INPUT_FIELDS:
             del point[f]
 
@@ -608,6 +651,43 @@ async def build_analytics_data(
     }
     if humidity_model_info:
         res_data["humidity_model"] = humidity_model_info
+
+    configured_plants = settings.get("heat_plants") if isinstance(settings, dict) else None
+    if isinstance(configured_plants, list) and configured_plants:
+        plants_live = getattr(coordinator, "heat_plants_live", {}) if coordinator else {}
+        plants_history: dict[str, list[dict]] = {}
+        if history_store and hasattr(history_store, "read_plant_detail"):
+            for p_cfg in configured_plants:
+                if not isinstance(p_cfg, dict) or not p_cfg.get("id"):
+                    continue
+                pid = str(p_cfg["id"])
+                try:
+                    if custom_start is not None:
+                        p_detail = _plant_csv_to_points(
+                            await hass.async_add_executor_job(
+                                history_store.read_plant_detail, pid, None, custom_start, custom_end
+                            )
+                        )
+                        p_hist = _plant_csv_to_points(
+                            await hass.async_add_executor_job(
+                                history_store.read_plant_history, pid, None, custom_start, custom_end
+                            )
+                        )
+                    else:
+                        max_age_val = now - range_start
+                        p_detail = _plant_csv_to_points(
+                            await hass.async_add_executor_job(history_store.read_plant_detail, pid, max_age_val)
+                        )
+                        p_hist = _plant_csv_to_points(
+                            await hass.async_add_executor_job(history_store.read_plant_history, pid, max_age_val)
+                        )
+                    plants_history[pid] = sorted(p_hist + p_detail, key=lambda pt: pt["ts"])
+                except Exception:  # noqa: BLE001
+                    plants_history[pid] = []
+        res_data["heat_plants"] = configured_plants
+        res_data["heat_plants_live"] = plants_live if isinstance(plants_live, dict) else {}
+        res_data["heat_plants_history"] = plants_history
+
     return res_data
 
 

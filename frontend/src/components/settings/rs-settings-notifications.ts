@@ -24,6 +24,12 @@ export class RsSettingsNotifications extends RsSettingsBase {
   @property({ type: Boolean }) public moldDetectionEnabled = false;
   @property({ type: Boolean }) public moldPreventionEnabled = false;
   @property({ type: Boolean }) public moldPreventionNotify = false;
+  @property({ type: Boolean }) public heatPlantNotificationsEnabled = true;
+  @property({ type: Number }) public heatPlantNotificationCooldown = 180;
+
+  private _t(pl: string, en: string): string {
+    return (this.hass?.language ?? "en").toLowerCase().startsWith("pl") ? pl : en;
+  }
 
   render() {
     const l = this.hass.language;
@@ -43,7 +49,13 @@ export class RsSettingsNotifications extends RsSettingsBase {
             .text=${localize("notifications.enabled_hint", l)}
           ></rs-info-icon>
         </rs-list-row>
-        ${this.notificationsEnabled && !this.moldDetectionEnabled ? this._renderMoldOff() : nothing}
+        ${
+          this.notificationsEnabled &&
+          !this.moldDetectionEnabled &&
+          !this.heatPlantNotificationsEnabled
+            ? this._renderMoldOff()
+            : nothing
+        }
       </div>
 
       ${
@@ -115,6 +127,48 @@ export class RsSettingsNotifications extends RsSettingsBase {
                           ></rs-info-icon>
                         </rs-list-row>
                       `
+                    : nothing
+                }
+              </div>
+
+              <div class="settings-section">
+                <rs-list-row
+                  switch
+                  wrap
+                  .heading=${this._t(
+                    "Powiadomienia kotłowni i źródeł ciepła",
+                    "Boiler & heat plant notifications",
+                  )}
+                  .checked=${this.heatPlantNotificationsEnabled}
+                  @toggle-changed=${(e: CustomEvent<boolean>) =>
+                    this._fire("heatPlantNotificationsEnabled", e.detail)}
+                >
+                  <rs-info-icon
+                    slot="end"
+                    .text=${this._t(
+                      "Wysyła powiadomienia na wybranych odbiorców (lub trwałe powiadomienie HA) o konieczności dołożenia opału, opróżnienia popielnika, czyszczenia komina oraz alarmach przegrzania kotła/podłogówki.",
+                      "Delivers notifications to the recipients above (or persistent HA notifications) for fuel refill, ash tray emptying, chimney cleaning, and boiler/floor overheat alarms.",
+                    )}
+                  ></rs-info-icon>
+                </rs-list-row>
+                ${
+                  this.heatPlantNotificationsEnabled
+                    ? numberRow({
+                        hass: this.hass,
+                        label: this._t(
+                          "Powtarzanie alertów kotłowni co",
+                          "Heat plant alert repeat cooldown",
+                        ),
+                        info: this._t(
+                          "Minimalny odstęp (w minutach) między kolejnymi przypomnieniami o dołożeniu opału, popielniku lub kominie. Alarm przegrzania ma stały krótki odstęp 10 min.",
+                          "Minimum interval in minutes between repeated refill/ash/chimney reminders. Overheat safety alarms use a fixed 10-minute interval.",
+                        ),
+                        unit: "min",
+                        min: 15,
+                        max: 1440,
+                        value: this.heatPlantNotificationCooldown,
+                        onChange: (v) => this._fire("heatPlantNotificationCooldown", v),
+                      })
                     : nothing
                 }
               </div>

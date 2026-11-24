@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE, Platform.HUMIDIFIER]
@@ -96,10 +96,18 @@ MIN_OCCUPANCY_ECO_DELAY_MINUTES = 5
 DEFAULT_CO2_THRESHOLD = 1000
 MIN_CO2_THRESHOLD = 800
 MAX_CO2_THRESHOLD = 5000
+# Particulate matter (µg/m³): WHO / EU 24h reference values
+DEFAULT_PM25_THRESHOLD = 25
+DEFAULT_PM10_THRESHOLD = 50
+MIN_PM_THRESHOLD = 1
+MAX_PM_THRESHOLD = 1000
 # Good again below 80 % of the threshold (1000 -> 800 ppm); own hysteresis choice, not a UBA value
 AIR_QUALITY_CLEAR_FACTOR = 0.8
 VENTILATION_DOMAINS = ("fan", "switch", "input_boolean")
 VENTILATION_MIN_RUN_MINUTES = 15
+
+# Heat plant maintenance notification defaults
+DEFAULT_HEAT_PLANT_NOTIFICATION_COOLDOWN_MINUTES = 180
 
 # Humidity limits per room in % RH (#518, #526): too humid from the upper limit on, fine again
 # HUMIDITY_HYSTERESIS below it; the lower limit mirrors that. 40-60 % is the usual comfort band

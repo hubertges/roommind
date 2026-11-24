@@ -59,8 +59,11 @@ export interface RoomLiveData {
   /** Air quality readings (#267), null without sensor or reading. */
   co2?: number | null;
   voc?: number | null;
+  pm25?: number | null;
+  pm10?: number | null;
+  pm1?: number | null;
   air_quality_bad?: boolean;
-  air_quality_reason?: "co2" | "voc" | null;
+  air_quality_reason?: "co2" | "voc" | "pm25" | "pm10" | "pm1" | null;
   /** RoomMind runs the room's ventilation entity for bad air. */
   ventilation_active?: boolean;
   /** Past the room's humidity limits (#518, #526), with hysteresis. */
@@ -205,6 +208,8 @@ export type HeatPlantType =
   | "coal_boiler"
   | "pellet_boiler"
   | "wood_boiler"
+  | "fireplace"
+  | "underfloor_manifold"
   | "gas_boiler"
   | "electric_heater"
   | "air_heater"
@@ -217,6 +222,10 @@ export interface HeatPlantConfig {
   name: string;
   plant_type: HeatPlantType;
   enabled: boolean;
+  priority?: number;
+  parent_plant_id?: string;
+  cannot_extinguish?: boolean;
+  min_power_pct?: number;
   assigned_devices: string[];
   assigned_rooms: string[];
   source_entity: string;
@@ -245,21 +254,45 @@ export interface HeatPlantConfig {
   currency: string;
   energy_sensor: string;
   fuel_consumption_sensor: string;
+  feeder_entity?: string;
+  feeder_kg_per_hour?: number;
+  hopper_capacity_kg?: number;
+  hopper_level_sensor?: string;
+  ash_content_pct?: number;
+  notify_refill_enabled?: boolean;
+  refill_alert_kg?: number;
+  refill_alert_pct?: number;
+  notify_ash_enabled?: boolean;
+  ash_clean_interval_kg?: number;
+  ash_clean_interval_days?: number;
+  notify_chimney_enabled?: boolean;
+  chimney_clean_interval_kg?: number;
+  chimney_clean_interval_days?: number;
 }
 
 export interface HeatPlantLive {
   id: string;
+  name?: string;
+  plant_type?: HeatPlantType;
+  cannot_extinguish?: boolean;
+  in_fire_hold?: boolean;
+  priority?: number;
+  parent_plant_id?: string;
+  child_demands?: string[];
+  assisted_by?: string[];
   state:
     | "heating"
     | "dhw"
     | "heating_and_dhw"
     | "overheat_protect"
+    | "hold"
     | "active"
     | "idle";
   source_active: boolean;
   heating_demand: boolean;
   dhw_demand: boolean;
   overheat_protect: boolean;
+  low_return_warning?: boolean;
   supply_temp: number | null;
   return_temp: number | null;
   delta_t: number | null;
@@ -274,6 +307,8 @@ export interface HeatPlantLive {
   mean_power_pct: number;
   max_power_pct: number;
   fuel_unit: "kg" | "m³" | "kWh";
+  fuel_source_mode?: "fuel_sensor" | "feeder" | "energy_sensor" | "estimated";
+  feeder_active?: boolean;
   chemical_kwh_per_kg: number;
   usable_kwh_per_kg: number;
   current_thermal_kw: number;
@@ -291,6 +326,38 @@ export interface HeatPlantLive {
   fuel_consumed_total: number;
   cost_today: number;
   cost_total: number;
+  fuel_remaining_kg?: number | null;
+  hopper_pct?: number | null;
+  hours_until_refill?: number | null;
+  fuel_since_refill_kg?: number;
+  fuel_since_ash_clean_kg?: number;
+  estimated_ash_kg?: number;
+  ash_fill_pct?: number;
+  days_since_ash_clean?: number;
+  fuel_since_chimney_clean_kg?: number;
+  chimney_wear_pct?: number;
+  days_since_chimney_clean?: number;
+  refill_needed?: boolean;
+  ash_clean_needed?: boolean;
+  chimney_clean_needed?: boolean;
+  maintenance_alerts?: Array<"refill" | "ash" | "chimney">;
+}
+
+export interface HeatPlantHistoryPoint {
+  ts: number;
+  state: string;
+  supply_temp: number | null;
+  return_temp: number | null;
+  dhw_temp: number | null;
+  flue_temp: number | null;
+  delta_t: number | null;
+  thermal_kw: number | null;
+  burn_rate_per_h: number | null;
+  fuel_consumed_today: number | null;
+  fuel_remaining_kg: number | null;
+  cost_today: number | null;
+  ch_pump_active: boolean;
+  dhw_pump_active: boolean;
 }
 
 export interface RoomConfig {
@@ -309,6 +376,13 @@ export interface RoomConfig {
   voc_sensor?: string;
   /** In the VOC sensor's unit; null = shown, not judged. */
   voc_threshold?: number | null;
+  /** Particulate matter sensors (µg/m³). */
+  pm25_sensor?: string;
+  pm25_threshold?: number | null;
+  pm10_sensor?: string;
+  pm10_threshold?: number | null;
+  pm1_sensor?: string;
+  pm1_threshold?: number | null;
   /** fan.*, switch.* or input_boolean.* RoomMind switches on for bad air. */
   ventilation_entity?: string;
   /** % RH; null = not regulated. Too humid from max on, too dry from min on (#518, #526). */
@@ -443,6 +517,9 @@ export interface GlobalSettings {
   mold_prevention_intensity?: "light" | "medium" | "strong";
   mold_prevention_notify_enabled?: boolean;
   mold_prevention_notify_targets?: NotificationTarget[];
+  heat_plant_notifications_enabled?: boolean;
+  heat_plant_notification_targets?: NotificationTarget[];
+  heat_plant_notification_cooldown?: number;
   compressor_groups?: CompressorGroup[];
   heat_plants?: HeatPlantConfig[];
   room_order?: string[];
@@ -527,6 +604,14 @@ export interface AnalyticsDataPoint {
   humidity?: number | null;
   /** Room CO2 in ppm (#267). */
   co2?: number | null;
+  /** Room particulate matter in µg/m³. */
+  pm25?: number | null;
+  pm10?: number | null;
+  /** Humidity control telemetry. */
+  humidity_action?: string;
+  humidify_target?: number | null;
+  dehumidify_target?: number | null;
+  humidifying_power?: number | null;
   heat_target?: number | null;
   cool_target?: number | null;
   /** What set the target: "" schedule, else a TargetReason. */
@@ -551,6 +636,15 @@ export interface AnalyticsStats {
   window_hours: number;
   heating_starts: number;
   cooling_starts: number;
+  humidifying_hours?: number;
+  dehumidifying_hours?: number;
+  humidifying_starts?: number;
+  dehumidifying_starts?: number;
+  humidity_comfort?: {
+    below_pct: number;
+    within_pct: number;
+    above_pct: number;
+  } | null;
   /** How far past the target the room went after the runs, null without runs. */
   heat_overshoot?: RunOvershoot | null;
   /** Run hours by price level, null without a price source. */
@@ -600,6 +694,17 @@ export interface ModelDay {
   error_steps: number;
 }
 
+export interface HumidityModelInfo {
+  confidence: number;
+  model: Record<string, number>;
+  n_samples: number;
+  n_observations: number;
+  n_humidifying: number;
+  n_dehumidifying: number;
+  applicable_modes: string[];
+  mpc_active: boolean;
+}
+
 export interface AnalyticsData {
   detail: AnalyticsDataPoint[];
   history: AnalyticsDataPoint[];
@@ -608,6 +713,10 @@ export interface AnalyticsData {
   rhythm?: AnalyticsRhythm | null;
   /** Unit of the price source (ct/kWh, EUR/kWh, ...), empty for a switch or none. */
   price_unit?: string;
+  humidity_model?: HumidityModelInfo;
+  heat_plants?: HeatPlantConfig[];
+  heat_plants_live?: Record<string, HeatPlantLive>;
+  heat_plants_history?: Record<string, HeatPlantHistoryPoint[]>;
   model: {
     confidence: number;
     /** One entry per local day, oldest first. */

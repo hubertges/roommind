@@ -211,6 +211,41 @@ export class RsRoomCard extends LitElement {
         --mdc-icon-size: 16px;
       }
 
+      .hum.humidifying {
+        color: var(--rs-humidify-text);
+        font-weight: 500;
+      }
+
+      .hum.humidifying ha-icon {
+        color: var(--rs-humidify);
+      }
+
+      .hum.dehumidifying {
+        color: var(--rs-dehumidify-text);
+        font-weight: 500;
+      }
+
+      .hum.dehumidifying ha-icon {
+        color: var(--rs-dehumidify);
+      }
+
+      .pm-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+        --mdc-icon-size: 14px;
+      }
+
+      .pm-badge.bad {
+        color: var(--rs-warn-text);
+        font-weight: 500;
+      }
+
       .target {
         margin-left: auto;
         margin-top: 2px;
@@ -507,6 +542,34 @@ export class RsRoomCard extends LitElement {
     const unit = tempUnit(this.hass);
     const temp = live?.current_temp;
     const hum = live?.current_humidity;
+    const humAction =
+      live?.humidity_action === "humidifying" || live?.humidifier_active
+        ? "humidifying"
+        : live?.humidity_action === "dehumidifying" ||
+            live?.dehumidifier_active ||
+            live?.ac_dry_active
+          ? "dehumidifying"
+          : "";
+    const humTarget =
+      humAction === "humidifying"
+        ? (live?.humidify_target ?? live?.target_humidity)
+        : humAction === "dehumidifying"
+          ? (live?.dehumidify_target ?? live?.target_humidity)
+          : null;
+    const humIcon =
+      humAction === "humidifying"
+        ? "mdi:water-plus"
+        : humAction === "dehumidifying"
+          ? "mdi:water-minus"
+          : "mdi:water-percent";
+    const pmVal = live?.pm25 ?? live?.pm10 ?? live?.pm1;
+    const pmLabel = live?.pm25 != null ? "PM2.5" : live?.pm10 != null ? "PM10" : "PM1";
+    const pmBad =
+      live?.air_quality_bad &&
+      (live.air_quality_reason === "pm25" ||
+        live.air_quality_reason === "pm10" ||
+        live.air_quality_reason === "pm1");
+
     return html`<div class="temps">
       ${
         temp != null
@@ -518,14 +581,24 @@ export class RsRoomCard extends LitElement {
       ${
         hum != null
           ? html`<span
-              class="hum"
+              class="hum ${humAction}"
               aria-label=${localize("card.humidity", this._lang, {
                 value: formatPercent(hum, { language: this._lang }),
               })}
-              ><ha-icon icon="mdi:water-percent" aria-hidden="true"></ha-icon>${formatPercent(
+              ><ha-icon .icon=${humIcon} aria-hidden="true"></ha-icon>${formatPercent(
                 hum,
                 this.hass,
-              )}</span
+              )}${
+                humTarget != null ? `→${formatPercent(Math.round(humTarget), this.hass)}` : ""
+              }</span
+            >`
+          : nothing
+      }
+      ${
+        pmVal != null
+          ? html`<span class="pm-badge ${pmBad ? "bad" : ""}"
+              ><ha-icon icon="mdi:blur" aria-hidden="true"></ha-icon>${pmLabel}
+              ${Math.round(pmVal)}</span
             >`
           : nothing
       }

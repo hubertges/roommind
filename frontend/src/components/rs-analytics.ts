@@ -4,7 +4,14 @@
  */
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import type { HomeAssistant, RoomConfig, AnalyticsData, AnalyticsDataPoint } from "../types";
+import type {
+  HomeAssistant,
+  RoomConfig,
+  AnalyticsData,
+  AnalyticsDataPoint,
+  HeatPlantConfig,
+  HeatPlantLive,
+} from "../types";
 import { localize } from "../utils/localize";
 import { boostHoursLeft } from "../utils/learning";
 import {
@@ -14,11 +21,15 @@ import {
   quickRange,
   startOfDayInZone,
 } from "../utils/analytics-time";
+import { formatNumber, formatPercent } from "../utils/format";
+import { tokens } from "../styles/tokens";
+import "./shared/rs-list-card";
 import "./analytics/rs-analytics-toolbar";
 import "./analytics/rs-analytics-summary";
 import "./analytics/rs-analytics-chart";
 import "./analytics/rs-analytics-rhythm";
 import "./analytics/rs-analytics-model";
+import "./analytics/rs-analytics-heat-plants";
 
 /** What a room can show: the summary, rhythm, chart and model card use the same flags. */
 function roomFlags(room: RoomConfig | undefined) {
@@ -27,6 +38,14 @@ function roomFlags(room: RoomConfig | undefined) {
     canCool:
       room?.climate_mode !== "heat_only" && (room?.devices ?? []).some((d) => d.type === "ac"),
     hasWindowSensor: (room?.window_sensors?.length ?? 0) > 0,
+    hasHumidityControl: Boolean(
+      room?.humidifier_entity ||
+        room?.dehumidifier_entity ||
+        room?.humidity_min != null ||
+        room?.humidity_max != null ||
+        room?.comfort_humidify != null ||
+        room?.comfort_dehumidify != null,
+    ),
     // The price only matters where it moves something
     followsPrice:
       !room?.is_outdoor && ((room?.price_shift ?? 0) > 0 || !!room?.heat_source_price_aware),
@@ -44,6 +63,8 @@ function bandSides(mode: string | undefined): "both" | "heat" | "cool" {
 export class RsAnalytics extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ type: Object }) public rooms: Record<string, RoomConfig> = {};
+  @property({ attribute: false }) public heatPlants: HeatPlantConfig[] = [];
+  @property({ attribute: false }) public heatPlantsLive: Record<string, HeatPlantLive> = {};
   @property() public initialRoom = "";
   @property() public controlMode: "mpc" | "bangbang" = "mpc";
 
@@ -114,6 +135,9 @@ export class RsAnalytics extends LitElement {
   protected render() {
     const l = this.hass.language;
     const flags = roomFlags(this.rooms[this._selectedRoom]);
+    const plants = this._data?.heat_plants ?? this.heatPlants;
+    const plantsLive = this._data?.heat_plants_live ?? this.heatPlantsLive;
+    const plantsHistory = this._data?.heat_plants_history ?? {};
 
     return html`
       <rs-analytics-toolbar
@@ -128,6 +152,19 @@ export class RsAnalytics extends LitElement {
         @room-selected=${this._onRoomSelected}
         @range-changed=${this._onRangeChanged}
       ></rs-analytics-toolbar>
+      ${
+        plants.length > 0
+          ? html`<rs-analytics-heat-plants
+              .hass=${this.hass}
+              .heatPlants=${plants}
+              .heatPlantsLive=${plantsLive}
+              .heatPlantsHistory=${plantsHistory}
+              .rangeStart=${this._rangeStart}
+              .rangeEnd=${this._rangeEnd}
+              @heat-plants-updated=${() => this._silentRefresh()}
+            ></rs-analytics-heat-plants>`
+          : nothing
+      }
       ${
         this._selectedRoom
           ? this._loading && !this._data
@@ -178,6 +215,7 @@ export class RsAnalytics extends LitElement {
                       ></rs-analytics-model>`
                     : nothing
                 }
+                ${this._renderHumidityModel()}
               `
           : html`
               <div class="no-data">
@@ -206,9 +244,53 @@ export class RsAnalytics extends LitElement {
       .canHeat=${flags.canHeat}
       .canCool=${flags.canCool}
       .hasWindowSensor=${flags.hasWindowSensor}
+      .hasHumidityControl=${flags.hasHumidityControl}
       .showPrice=${flags.followsPrice}
       .language=${this.hass.language}
     ></rs-analytics-summary>`;
+  }
+
+  private _renderHumidityModel() {
+    const hm = this._data?.humidity_model;
+    if (!hm) return nothing;
+    const isPl = (this.hass?.language ?? "en").toLowerCase().startsWith("pl");
+    const t = (pl: string, en: string) => (isPl ? pl : en);
+    const pct = Math.round((hm.confidence ?? 0) * 100);
+    return html`
+      <rs-list-card
+        class="hum-model-card"
+        .heading=${t("Model nawilżania (MPC)", "Humidification MPC Model")}
+      >
+        <div class="hum-model-body">
+          <div class="hum-model-badge ${hm.mpc_active ? "active" : ""}">
+            <ha-icon icon="mdi:water-percent"></ha-icon>
+            ${
+              hm.mpc_active
+                ? t("MPC nawilżania AKTYWNE", "Humidity MPC ACTIVE")
+                : t("Uczenie modelu nawilżania", "Humidity MPC learning")
+            }
+          </div>
+          <div class="hum-model-grid">
+            <div class="hum-stat">
+              <span class="hum-stat-label">${t("Pewność modelu", "Confidence")}</span>
+              <span class="hum-stat-val">${formatPercent(pct, this.hass)}</span>
+            </div>
+            <div class="hum-stat">
+              <span class="hum-stat-label">${t("Obserwacje", "Observations")}</span>
+              <span class="hum-stat-val">${formatNumber(hm.n_observations, this.hass, 0)}</span>
+            </div>
+            <div class="hum-stat">
+              <span class="hum-stat-label">${t("Próbki nawilżania", "Humidifying samples")}</span>
+              <span class="hum-stat-val">${formatNumber(hm.n_humidifying, this.hass, 0)}</span>
+            </div>
+            <div class="hum-stat">
+              <span class="hum-stat-label">${t("Próbki osuszania", "Dehumidifying samples")}</span>
+              <span class="hum-stat-val">${formatNumber(hm.n_dehumidifying, this.hass, 0)}</span>
+            </div>
+          </div>
+        </div>
+      </rs-list-card>
+    `;
   }
 
   /** History and detail as loaded; one array per answer so the summary does not redraw needlessly. */
@@ -322,42 +404,103 @@ export class RsAnalytics extends LitElement {
     }
   }
 
-  static styles = css`
-    :host {
-      display: block;
-      min-width: 0;
-    }
+  static styles = [
+    tokens,
+    css`
+      :host {
+        display: block;
+        min-width: 0;
+      }
 
-    rs-analytics-chart {
-      scroll-margin-top: 120px;
-    }
+      rs-analytics-chart {
+        scroll-margin-top: 120px;
+      }
 
-    .no-data {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 80px 16px;
-      text-align: center;
-      color: var(--secondary-text-color);
-    }
+      .hum-model-card {
+        display: block;
+        margin-bottom: var(--rs-space-4);
+      }
 
-    .no-data p {
-      font-size: 15px;
-      max-width: 400px;
-      line-height: 1.5;
-      margin-top: 16px;
-    }
+      .hum-model-body {
+        padding: var(--rs-space-2) var(--rs-space-4) var(--rs-space-4);
+        display: flex;
+        flex-direction: column;
+        gap: var(--rs-space-3);
+      }
 
-    .loading {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 80px 16px;
-      color: var(--secondary-text-color);
-      font-size: 14px;
-    }
-  `;
+      .hum-model-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        align-self: flex-start;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 500;
+        background: var(--rs-fill);
+        color: var(--secondary-text-color);
+        --mdc-icon-size: 16px;
+      }
+
+      .hum-model-badge.active {
+        background: color-mix(in srgb, var(--rs-humidify) 16%, transparent);
+        color: var(--rs-humidify-text);
+      }
+
+      .hum-model-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px;
+      }
+
+      .hum-stat {
+        padding: 10px 12px;
+        border-radius: var(--rs-radius-sm);
+        background: var(--rs-fill);
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .hum-stat-label {
+        font-size: 11px;
+        color: var(--secondary-text-color);
+      }
+
+      .hum-stat-val {
+        font-size: 17px;
+        font-weight: 500;
+        color: var(--rs-humidify-text);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .no-data {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 80px 16px;
+        text-align: center;
+        color: var(--secondary-text-color);
+      }
+
+      .no-data p {
+        font-size: 15px;
+        max-width: 400px;
+        line-height: 1.5;
+        margin-top: 16px;
+      }
+
+      .loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 80px 16px;
+        color: var(--secondary-text-color);
+        font-size: 14px;
+      }
+    `,
+  ];
 }
 
 declare global {

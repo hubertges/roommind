@@ -32,6 +32,7 @@ from .const import (
     MAX_HUMIDITY_MIN,
     MAX_MASTER_DELAY_S,
     MAX_MASTER_TEMPERATURE,
+    MAX_PM_THRESHOLD,
     MAX_PRICE_SHIFT_K,
     MAX_TARGET_HUMIDITY,
     MAX_TARGET_TEMP,
@@ -40,6 +41,7 @@ from .const import (
     MIN_HUMIDITY_MIN,
     MIN_MASTER_TEMPERATURE,
     MIN_OCCUPANCY_ECO_DELAY_MINUTES,
+    MIN_PM_THRESHOLD,
     MIN_TARGET_HUMIDITY,
     MIN_TARGET_TEMP,
     OVERRIDE_CUSTOM,
@@ -192,6 +194,12 @@ _ROOM_SAVE_FIELDS = (
     "co2_threshold",
     "voc_sensor",
     "voc_threshold",
+    "pm25_sensor",
+    "pm25_threshold",
+    "pm10_sensor",
+    "pm10_threshold",
+    "pm1_sensor",
+    "pm1_threshold",
     "ventilation_entity",
     "humidity_max",
     "humidity_min",
@@ -280,6 +288,9 @@ _SETTINGS_SAVE_FIELDS = (
     "mold_prevention_intensity",
     "mold_prevention_notify_enabled",
     "mold_prevention_notify_targets",
+    "heat_plant_notifications_enabled",
+    "heat_plant_notification_targets",
+    "heat_plant_notification_cooldown",
     "room_order",
     "group_by_floor",
     "floor_order",
@@ -315,6 +326,9 @@ def _validate_no_own_entities(config: dict, own_prefix: str) -> str | None:
         "humidity_sensor",
         "co2_sensor",
         "voc_sensor",
+        "pm25_sensor",
+        "pm10_sensor",
+        "pm1_sensor",
         "ventilation_entity",
         *_HUMIDITY_DEVICE_FIELDS,
         "solar_sensor",
@@ -448,6 +462,9 @@ async def websocket_list_rooms(
             "occupancy_vacant": live.get("occupancy_vacant", False),
             "co2": live.get("co2"),
             "voc": live.get("voc"),
+            "pm25": live.get("pm25"),
+            "pm10": live.get("pm10"),
+            "pm1": live.get("pm1"),
             "air_quality_bad": live.get("air_quality_bad", False),
             "air_quality_reason": live.get("air_quality_reason"),
             "ventilation_active": live.get("ventilation_active", False),
@@ -660,6 +677,18 @@ async def websocket_list_rooms(
         vol.Optional("solar_sensor"): str,
         # In the sensor's own unit (index, ppb, µg/m³); None = the reading is shown, not judged
         vol.Optional("voc_threshold"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0.001, max=1e6))),
+        vol.Optional("pm25_sensor"): str,
+        vol.Optional("pm25_threshold"): vol.Any(
+            None, vol.All(vol.Coerce(float), vol.Range(min=MIN_PM_THRESHOLD, max=MAX_PM_THRESHOLD))
+        ),
+        vol.Optional("pm10_sensor"): str,
+        vol.Optional("pm10_threshold"): vol.Any(
+            None, vol.All(vol.Coerce(float), vol.Range(min=MIN_PM_THRESHOLD, max=MAX_PM_THRESHOLD))
+        ),
+        vol.Optional("pm1_sensor"): str,
+        vol.Optional("pm1_threshold"): vol.Any(
+            None, vol.All(vol.Coerce(float), vol.Range(min=MIN_PM_THRESHOLD, max=MAX_PM_THRESHOLD))
+        ),
         vol.Optional("ventilation_entity"): vol.Any(
             "", vol.All(str, vol.Match(rf"^({'|'.join(VENTILATION_DOMAINS)})\.[a-z0-9_]+$"))
         ),
@@ -1111,18 +1140,31 @@ async def websocket_get_settings(
                 vol.Optional("off_mode", default=MASTER_OFF_MODE_OFF): vol.In(MASTER_OFF_MODES),
             }
         ],
+        vol.Optional("heat_plant_notifications_enabled"): bool,
+        vol.Optional("heat_plant_notification_cooldown"): vol.All(vol.Coerce(int), vol.Range(min=10, max=1440)),
+        vol.Optional("heat_plant_notification_targets"): [
+            {
+                vol.Required("entity_id"): str,
+                vol.Optional("person_entity", default=""): str,
+                vol.Optional("notify_when", default="always"): vol.In(["always", "home_only"]),
+            }
+        ],
         vol.Optional("heat_plants"): [
             {
                 vol.Required("id"): str,
                 vol.Required("name"): str,
                 vol.Optional("plant_type", default="coal_boiler"): vol.In(HEAT_PLANT_TYPES),
                 vol.Optional("enabled", default=True): bool,
+                vol.Optional("priority", default=1): vol.All(vol.Coerce(int), vol.Range(min=1, max=20)),
+                vol.Optional("parent_plant_id", default=""): str,
+                vol.Optional("cannot_extinguish"): bool,
+                vol.Optional("min_power_pct", default=12.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=50)),
                 vol.Optional("assigned_devices", default=[]): [str],
                 vol.Optional("assigned_rooms", default=[]): [str],
                 vol.Optional("source_entity", default=""): str,
                 vol.Optional("target_supply_temp", default=55.0): vol.Coerce(float),
-                vol.Optional("idle_supply_temp", default=35.0): vol.Coerce(float),
-                vol.Optional("off_mode", default="off"): vol.In(["off", "temperature"]),
+                vol.Optional("idle_supply_temp", default=42.0): vol.Coerce(float),
+                vol.Optional("off_mode", default="temperature"): vol.In(["off", "temperature"]),
                 vol.Optional("min_rooms_demand", default=1): vol.All(vol.Coerce(int), vol.Range(min=1, max=50)),
                 vol.Optional("supply_temp_sensor", default=""): str,
                 vol.Optional("return_temp_sensor", default=""): str,
@@ -1145,6 +1187,38 @@ async def websocket_get_settings(
                 vol.Optional("currency", default="PLN"): str,
                 vol.Optional("energy_sensor", default=""): str,
                 vol.Optional("fuel_consumption_sensor", default=""): str,
+                vol.Optional("feeder_entity", default=""): str,
+                vol.Optional("feeder_kg_per_hour", default=12.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.1, max=200.0)
+                ),
+                vol.Optional("hopper_capacity_kg", default=100.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=1.0, max=5000.0)
+                ),
+                vol.Optional("hopper_level_sensor", default=""): str,
+                vol.Optional("ash_content_pct", default=7.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=40.0)
+                ),
+                vol.Optional("notify_refill_enabled", default=False): bool,
+                vol.Optional("refill_alert_kg", default=20.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=1000.0)
+                ),
+                vol.Optional("refill_alert_pct", default=20.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=100.0)
+                ),
+                vol.Optional("notify_ash_enabled", default=False): bool,
+                vol.Optional("ash_clean_interval_kg", default=150.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=5000.0)
+                ),
+                vol.Optional("ash_clean_interval_days", default=7): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=365)
+                ),
+                vol.Optional("notify_chimney_enabled", default=False): bool,
+                vol.Optional("chimney_clean_interval_kg", default=1000.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=20000.0)
+                ),
+                vol.Optional("chimney_clean_interval_days", default=90): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=365)
+                ),
             }
         ],
     }
@@ -1496,6 +1570,70 @@ async def websocket_heat_plants_reset_stats(
     connection.send_result(msg["id"], {"success": True})
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/heat_plants/log_fuel",
+        vol.Required("plant_id"): str,
+        vol.Required("kg"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=5000.0)),
+        vol.Optional("mode", default="burned"): vol.In(["burned", "refill"]),
+    }
+)
+@websocket_api.async_response
+async def websocket_heat_plants_log_fuel(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Log manual kg of burned fuel or hopper/fireplace refill."""
+    store = hass.data[DOMAIN]["store"]
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
+        connection.send_error(msg["id"], "no_coordinator", "Coordinator not ready")
+        return
+    coordinator._heat_plant_manager.load_configs(store.get_settings().get("heat_plants", []))
+    ok = coordinator._heat_plant_manager.log_fuel(
+        msg["plant_id"], float(msg["kg"]), mode=msg.get("mode", "burned")
+    )
+    if not ok:
+        connection.send_error(msg["id"], "not_found", f"Heat plant '{msg['plant_id']}' not found")
+        return
+    await store.async_save_settings({"heat_plant_state": coordinator._heat_plant_manager.get_state()})
+    await coordinator.async_request_refresh()
+    connection.send_result(msg["id"], {"success": True})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/heat_plants/maintenance",
+        vol.Required("plant_id"): str,
+        vol.Required("action"): vol.In(["refill", "ash_cleaned", "chimney_cleaned"]),
+        vol.Optional("kg"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=5000.0)),
+    }
+)
+@websocket_api.async_response
+async def websocket_heat_plants_maintenance(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Confirm heat plant maintenance action (refill, ash container emptied, chimney cleaned)."""
+    store = hass.data[DOMAIN]["store"]
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
+        connection.send_error(msg["id"], "no_coordinator", "Coordinator not ready")
+        return
+    coordinator._heat_plant_manager.load_configs(store.get_settings().get("heat_plants", []))
+    ok = coordinator._heat_plant_manager.confirm_maintenance(
+        msg["plant_id"], msg["action"], kg=msg.get("kg")
+    )
+    if not ok:
+        connection.send_error(msg["id"], "not_found", f"Heat plant '{msg['plant_id']}' not found")
+        return
+    await store.async_save_settings({"heat_plant_state": coordinator._heat_plant_manager.get_state()})
+    await coordinator.async_request_refresh()
+    connection.send_result(msg["id"], {"success": True})
+
+
 @callback
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     """Register all RoomMind WebSocket commands."""
@@ -1513,3 +1651,5 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_get_diagnostics)
     websocket_api.async_register_command(hass, websocket_covers_clear_override)
     websocket_api.async_register_command(hass, websocket_heat_plants_reset_stats)
+    websocket_api.async_register_command(hass, websocket_heat_plants_log_fuel)
+    websocket_api.async_register_command(hass, websocket_heat_plants_maintenance)

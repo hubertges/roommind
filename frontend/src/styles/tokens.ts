@@ -13,6 +13,8 @@ export const tokens = css`
     --rs-fill-primary: color-mix(in srgb, var(--primary-color) 10%, transparent);
     --rs-heat: var(--state-climate-heat-color, var(--warning-color));
     --rs-cool: var(--state-climate-cool-color, var(--info-color));
+    --rs-humidify: #00acc1;
+    --rs-dehumidify: #9c27b0;
     --rs-ok: var(--success-color);
     --rs-warn: var(--warning-color);
     --rs-err: var(--error-color);
@@ -20,6 +22,8 @@ export const tokens = css`
        12-16 % tint in HA's light and dark theme (orange alone: 1.8:1). Icons keep the plain colour. */
     --rs-heat-text: color-mix(in srgb, var(--rs-heat) 50%, var(--primary-text-color));
     --rs-cool-text: color-mix(in srgb, var(--rs-cool) 50%, var(--primary-text-color));
+    --rs-humidify-text: color-mix(in srgb, var(--rs-humidify) 60%, var(--primary-text-color));
+    --rs-dehumidify-text: color-mix(in srgb, var(--rs-dehumidify) 55%, var(--primary-text-color));
     --rs-ok-text: color-mix(in srgb, var(--rs-ok) 50%, var(--primary-text-color));
     --rs-warn-text: color-mix(in srgb, var(--rs-warn) 50%, var(--primary-text-color));
     --rs-err-text: color-mix(in srgb, var(--rs-err) 50%, var(--primary-text-color));

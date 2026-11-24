@@ -168,3 +168,51 @@ def dismiss_mold_notification(
     """Dismiss the persistent mold notification for a room."""
     notification_id = f"{NOTIF_PREFIX}{area_id}_{tag_suffix}"
     async_dismiss(hass, notification_id)
+
+
+async def async_send_notification(
+    hass: HomeAssistant,
+    notification_id: str,
+    targets: list[dict],
+    message: str,
+    title: str,
+    tag: str | None = None,
+) -> asyncio.Task[None] | None:
+    """Send a generic RoomMind notification to configured targets with persistent fallback."""
+    effective_tag = tag or notification_id
+    if not targets:
+        async_create(hass, message, title=title, notification_id=notification_id)
+        return None
+
+    recipients: list[str] = []
+    for target in targets:
+        entity_id = target.get("entity_id", "")
+        if not entity_id:
+            continue
+        person_entity = target.get("person_entity", "")
+        notify_when = target.get("notify_when", "always")
+        if notify_when == "home_only" and person_entity:
+            if not _is_person_home(hass, person_entity):
+                _LOGGER.debug(
+                    "Skipping notification %s to %s — person %s is away",
+                    notification_id,
+                    entity_id,
+                    person_entity,
+                )
+                continue
+        recipients.append(entity_id)
+
+    if not recipients:
+        async_create(hass, message, title=title, notification_id=notification_id)
+        return None
+
+    task: asyncio.Task[None] = hass.async_create_background_task(
+        _async_deliver(hass, recipients, message, title, effective_tag),
+        name=f"roommind_notify_{effective_tag}",
+    )
+    return task
+
+
+def dismiss_notification(hass: HomeAssistant, notification_id: str) -> None:
+    """Dismiss a persistent notification by its ID."""
+    async_dismiss(hass, notification_id)

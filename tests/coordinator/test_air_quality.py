@@ -250,3 +250,59 @@ async def test_a_run_from_before_the_restart_goes_on(hass, mock_config_entry, co
     assert room["air_quality_bad"] is True
     assert room["ventilation_active"] is True
     assert _fan_calls(calls) == []
+
+
+@pytest.mark.asyncio
+async def test_pm25_and_pm10_thresholds_hysteresis_and_purifier(hass, mock_config_entry):
+    """PM2.5/PM10 above threshold triggers air_quality_bad, ventilation/purifier, and clears below 80%."""
+    pm25_eid = "sensor.living_pm25"
+    pm10_eid = "sensor.living_pm10"
+    room_cfg = {
+        **SAMPLE_ROOM,
+        "pm25_sensor": pm25_eid,
+        "pm25_threshold": 25,
+        "pm10_sensor": pm10_eid,
+        "pm10_threshold": 50,
+        "ventilation_entity": FAN,
+    }
+    store = _make_store_mock({AREA: room_cfg})
+    hass.data = {DOMAIN: {"store": store}}
+    base = make_mock_states_get(temp="21.0", humidity="50")
+    extra = {pm25_eid: "35", pm10_eid: "40", FAN: "off"}
+
+    def _get(eid):
+        if eid in extra:
+            return SimpleNamespace(state=extra[eid], attributes={})
+        return base(eid)
+
+    hass.states.get = _get
+    calls = []
+
+    async def _call(domain, service, data, **_kw):
+        calls.append((domain, service, data.get("entity_id")))
+        if data.get("entity_id") in extra and service in ("turn_on", "turn_off"):
+            extra[data["entity_id"]] = "on" if service == "turn_on" else "off"
+
+    hass.services.async_call = AsyncMock(side_effect=_call)
+    coordinator = _create_coordinator(hass, mock_config_entry)
+
+    # PM2.5 = 35 >= 25 -> bad air, reason pm25, fan/purifier ON
+    room = (await coordinator._async_update_data())["rooms"][AREA]
+    assert room["pm25"] == 35.0
+    assert room["pm10"] == 40.0
+    assert room["air_quality_bad"] is True
+    assert room["air_quality_reason"] == "pm25"
+    assert room["ventilation_active"] is True
+    assert _fan_calls(calls) == [("fan", "turn_on", FAN)]
+
+    # Hysteresis: PM2.5 = 22 (> 80% of 25 = 20) -> still bad
+    extra[pm25_eid] = "22"
+    room = (await coordinator._async_update_data())["rooms"][AREA]
+    assert room["air_quality_bad"] is True
+
+    # Drops below 20 -> good again
+    extra[pm25_eid] = "15"
+    room = (await coordinator._async_update_data())["rooms"][AREA]
+    assert room["air_quality_bad"] is False
+    assert room["air_quality_reason"] is None
+

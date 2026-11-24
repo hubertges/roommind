@@ -1,8 +1,14 @@
 /**
- * rs-heat-plants – Dedicated tab for boilers (coal/pellet/wood/gas), air/water heaters, and heat pumps.
- * Monitors supply/return/DHW/flue temperatures, circulation pumps (C.O. & CWU),
- * fuel calorific value (MJ/kg -> kWh/kg), burn rate & energy costs, and allows editing
- * which radiators (TRVs), underfloor systems, and rooms each heat plant serves.
+ * rs-heat-plants – Dedicated tab for multiple heat sources:
+ * boilers (ekogroszek/coal/pellet/wood/gas), fireplaces (kominek), underfloor heating manifolds (podłogówka),
+ * air/water heaters, and heat pumps.
+ *
+ * Features:
+ * - Multi-source priority & parent/child loop linking (e.g. underfloor manifold fed by boiler/fireplace).
+ * - Non-extinguishable solid-fuel safety ("cannot_extinguish"): fire-hold / podtrzymanie ognia mode.
+ * - Fuel kg tracking via HA kg/g sensor, auger/feeder screw (podajnik), manual kg logging, or calorific estimation.
+ * - Maintenance gauges, one-click confirmations, and HA notifications for:
+ *   refueling (dołożenie opału), ash tray emptying (popielnik), and chimney cleaning (czyszczenie komina).
  */
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -37,6 +43,7 @@ interface CalorificPreset {
   fuelType: FuelType;
   mjKg: number;
   efficiency: number;
+  ashPct: number;
 }
 
 const COAL_AND_FUEL_PRESETS: CalorificPreset[] = [
@@ -47,6 +54,7 @@ const COAL_AND_FUEL_PRESETS: CalorificPreset[] = [
     fuelType: "coal",
     mjKg: 28.0,
     efficiency: 84,
+    ashPct: 6.0,
   },
   {
     id: "ekogroszek",
@@ -55,6 +63,7 @@ const COAL_AND_FUEL_PRESETS: CalorificPreset[] = [
     fuelType: "coal",
     mjKg: 26.0,
     efficiency: 86,
+    ashPct: 7.0,
   },
   {
     id: "coal_standard",
@@ -63,6 +72,7 @@ const COAL_AND_FUEL_PRESETS: CalorificPreset[] = [
     fuelType: "coal",
     mjKg: 24.0,
     efficiency: 80,
+    ashPct: 9.0,
   },
   {
     id: "coal_fine",
@@ -71,6 +81,7 @@ const COAL_AND_FUEL_PRESETS: CalorificPreset[] = [
     fuelType: "coal",
     mjKg: 21.0,
     efficiency: 76,
+    ashPct: 12.0,
   },
   {
     id: "pellet",
@@ -79,6 +90,7 @@ const COAL_AND_FUEL_PRESETS: CalorificPreset[] = [
     fuelType: "pellet",
     mjKg: 18.0,
     efficiency: 90,
+    ashPct: 0.7,
   },
   {
     id: "wood",
@@ -87,6 +99,7 @@ const COAL_AND_FUEL_PRESETS: CalorificPreset[] = [
     fuelType: "wood",
     mjKg: 14.5,
     efficiency: 78,
+    ashPct: 1.5,
   },
 ];
 
@@ -99,6 +112,7 @@ export class RsHeatPlants extends LitElement {
 
   @state() private _editingId: string | null = null;
   @state() private _draft: HeatPlantConfig | null = null;
+  @state() private _fuelInputKg: Record<string, number> = {};
 
   static styles = [
     tokens,
@@ -112,7 +126,7 @@ export class RsHeatPlants extends LitElement {
 
       .header-bar {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: space-between;
         flex-wrap: wrap;
         gap: var(--rs-space-3);
@@ -129,6 +143,38 @@ export class RsHeatPlants extends LitElement {
         margin: 4px 0 0;
         font-size: var(--rs-font-sm);
         color: var(--secondary-text-color);
+      }
+
+      .quick-add-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .quick-add-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 7px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--divider-color);
+        background: var(--card-background-color, var(--primary-background-color));
+        color: var(--primary-text-color);
+        font-size: 13px;
+        font-weight: 500;
+        font-family: inherit;
+        cursor: pointer;
+        --mdc-icon-size: 17px;
+      }
+
+      .quick-add-btn:hover {
+        border-color: var(--primary-color);
+        background: var(--rs-fill-primary);
+      }
+
+      .quick-add-btn.primary {
+        border-color: var(--primary-color);
+        color: var(--primary-color);
       }
 
       .plants-grid {
@@ -165,6 +211,11 @@ export class RsHeatPlants extends LitElement {
       .plant-icon.active {
         background: color-mix(in srgb, var(--rs-heat) 18%, transparent);
         color: var(--rs-heat);
+      }
+
+      .plant-icon.hold {
+        background: color-mix(in srgb, var(--rs-warn) 18%, transparent);
+        color: var(--rs-warn);
       }
 
       .plant-icon.overheat {
@@ -210,14 +261,24 @@ export class RsHeatPlants extends LitElement {
         color: var(--rs-heat-text);
       }
 
+      .status-pill.hold {
+        background: color-mix(in srgb, var(--rs-warn) 18%, transparent);
+        color: var(--rs-warn-text);
+      }
+
       .status-pill.overheat {
         background: color-mix(in srgb, var(--rs-err) 18%, transparent);
         color: var(--rs-err-text);
       }
 
+      .status-pill.tag {
+        font-size: 11px;
+        padding: 2px 8px;
+      }
+
       .metrics-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
         gap: var(--rs-space-3);
       }
 
@@ -261,10 +322,103 @@ export class RsHeatPlants extends LitElement {
         text-transform: uppercase;
         letter-spacing: 0.4px;
         color: var(--secondary-text-color);
-        margin: 0 0 8px;
+        margin: 0 0 10px;
         display: flex;
         align-items: center;
         justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .maint-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: var(--rs-space-3);
+      }
+
+      .maint-card {
+        border: 1px solid var(--divider-color);
+        border-radius: 10px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        background: var(--card-background-color, var(--primary-background-color));
+      }
+
+      .maint-card.alert {
+        border-color: var(--rs-err);
+        background: color-mix(in srgb, var(--rs-err) 8%, var(--card-background-color));
+      }
+
+      .maint-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 500;
+        --mdc-icon-size: 17px;
+      }
+
+      .maint-head-left {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .maint-bar {
+        height: 7px;
+        border-radius: 4px;
+        background: var(--rs-fill-strong);
+        overflow: hidden;
+      }
+
+      .maint-bar > i {
+        display: block;
+        height: 100%;
+        border-radius: 4px;
+        background: var(--rs-ok);
+        transition: width 0.25s ease;
+      }
+
+      .maint-bar > i.warn {
+        background: var(--rs-warn);
+      }
+
+      .maint-bar > i.err {
+        background: var(--rs-err);
+      }
+
+      .maint-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-top: 2px;
+      }
+
+      .fuel-log-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: var(--rs-fill);
+        font-size: 12px;
+      }
+
+      .fuel-log-input {
+        width: 72px;
+        padding: 4px 8px;
+        border-radius: 6px;
+        border: 1px solid var(--divider-color);
+        background: var(--card-background-color, var(--primary-background-color));
+        color: var(--primary-text-color);
+        font: inherit;
+        font-variant-numeric: tabular-nums;
       }
 
       .chips-row {
@@ -322,14 +476,21 @@ export class RsHeatPlants extends LitElement {
         background: var(--rs-fill);
         border: 1px solid var(--divider-color);
         border-radius: 6px;
-        padding: 4px 8px;
+        padding: 4px 9px;
         font-size: 12px;
         color: var(--primary-text-color);
         cursor: pointer;
+        font-family: inherit;
       }
 
       .preset-btn:hover {
         border-color: var(--primary-color);
+      }
+
+      .preset-btn.accent {
+        border-color: color-mix(in srgb, var(--primary-color) 50%, var(--divider-color));
+        color: var(--primary-color);
+        font-weight: 500;
       }
 
       .radiator-list {
@@ -387,6 +548,16 @@ export class RsHeatPlants extends LitElement {
         padding-top: var(--rs-space-3);
         border-top: 1px solid var(--divider-color);
       }
+
+      select.parent-select {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--divider-color);
+        background: var(--card-background-color, var(--primary-background-color));
+        color: var(--primary-text-color);
+        font: inherit;
+      }
     `,
   ];
 
@@ -403,6 +574,8 @@ export class RsHeatPlants extends LitElement {
       coal_boiler: ["Piec węglowy / Ekogroszek", "Coal / Pea-coal boiler"],
       pellet_boiler: ["Kocioł na pellet", "Pellet boiler"],
       wood_boiler: ["Kocioł drzewny / zgazowujący", "Wood boiler"],
+      fireplace: ["Kominek / Płaszcz wodny", "Fireplace / Water jacket"],
+      underfloor_manifold: ["Ogrzewanie podłogowe (rozdzielacz)", "Underfloor heating manifold"],
       gas_boiler: ["Kocioł gazowy", "Gas boiler"],
       electric_heater: ["Kocioł / grzałka elektryczna", "Electric boiler"],
       air_heater: ["Nagrzewnica powietrzna / wodna", "Air / water heater"],
@@ -417,7 +590,11 @@ export class RsHeatPlants extends LitElement {
       case "coal_boiler":
       case "pellet_boiler":
       case "wood_boiler":
+        return "mdi:fire";
+      case "fireplace":
         return "mdi:fireplace";
+      case "underfloor_manifold":
+        return "mdi:waves";
       case "gas_boiler":
         return "mdi:water-boiler";
       case "air_heater":
@@ -440,6 +617,8 @@ export class RsHeatPlants extends LitElement {
         return this._t("Grzanie C.O. + CWU", "Heating C.O. + DHW");
       case "overheat_protect":
         return this._t("Chłodzenie awaryjne kotła!", "Emergency overheat cooling!");
+      case "hold":
+        return this._t("Podtrzymanie ognia (nie wygaszać)", "Fire hold (cannot extinguish)");
       case "active":
         return this._t("Praca", "Active");
       default:
@@ -452,18 +631,48 @@ export class RsHeatPlants extends LitElement {
     return html`
       <div class="header-bar">
         <div class="header-title">
-          <h2>${this._t("Źródła ciepła i kotłownia", "Heat Plants & Boiler Room")}</h2>
+          <h2>${this._t("Źródła ciepła i kotłownia", "Heat Sources & Boiler Room")}</h2>
           <p>
             ${this._t(
-              "Obsługa pieców, nagrzewnic i pomp ciepła, pomp obiegowych C.O./CWU, termometrów zasilania/powrotu oraz kosztów i kaloryczności opału.",
-              "Manage boilers, heaters, heat pumps, circulation pumps, supply/return/DHW thermometers, fuel calorific value, and energy costs.",
+              "Obsługa wielu źródeł ciepła (piec na ekogroszek, kominek, podłogówka, pompa ciepła), trybu podtrzymania ognia, spalania w kg oraz powiadomień konserwacyjnych.",
+              "Manage multiple heat sources (coal boiler, fireplace, underfloor heating, heat pump), fire-hold mode, kg fuel consumption, and maintenance notifications.",
             )}
           </p>
         </div>
-        <ha-button @click=${this._onAddPlant}>
-          <ha-icon icon="mdi:plus" slot="icon"></ha-icon>
-          ${this._t("Dodaj źródło ciepła", "Add heat source")}
-        </ha-button>
+        <div class="quick-add-bar">
+          <button
+            type="button"
+            class="quick-add-btn primary"
+            @click=${() => this._onAddPlant("coal_boiler")}
+          >
+            <ha-icon icon="mdi:fire"></ha-icon>
+            + ${this._t("Piec ekogroszek", "Coal boiler")}
+          </button>
+          <button
+            type="button"
+            class="quick-add-btn"
+            @click=${() => this._onAddPlant("fireplace")}
+          >
+            <ha-icon icon="mdi:fireplace"></ha-icon>
+            + ${this._t("Kominek", "Fireplace")}
+          </button>
+          <button
+            type="button"
+            class="quick-add-btn"
+            @click=${() => this._onAddPlant("underfloor_manifold")}
+          >
+            <ha-icon icon="mdi:waves"></ha-icon>
+            + ${this._t("Podłogówka", "Underfloor")}
+          </button>
+          <button
+            type="button"
+            class="quick-add-btn"
+            @click=${() => this._onAddPlant("heat_pump")}
+          >
+            <ha-icon icon="mdi:plus"></ha-icon>
+            ${this._t("Inne źródło", "Other source")}
+          </button>
+        </div>
       </div>
 
       ${
@@ -473,13 +682,36 @@ export class RsHeatPlants extends LitElement {
               <h3>${this._t("Brak skonfigurowanych źródeł ciepła", "No heat sources configured")}</h3>
               <p>
                 ${this._t(
-                  "Dodaj piec węglowy, kocioł na pellet/gaz, nagrzewnicę lub pompę ciepła, przypisz obsługiwane kaloryfery i termometry zasilania/powrotu/CWU.",
-                  "Add a coal/pellet/gas boiler, air heater, or heat pump, and assign radiators and supply/return/DHW sensors.",
+                  "Dodaj piec na ekogroszek, kominek, ogrzewanie podłogowe, kocioł gazowy lub pompę ciepła. Możesz dodać wiele źródeł ciepła naraz.",
+                  "Add a coal boiler, fireplace, underfloor heating, gas boiler, or heat pump. Multiple cooperating heat sources are supported.",
                 )}
               </p>
-              <ha-button @click=${this._onAddPlant}>
-                ${this._t("Dodaj pierwsze źródło ciepła", "Add first heat source")}
-              </ha-button>
+              <div class="quick-add-bar" style="justify-content: center; margin-top: 14px">
+                <button
+                  type="button"
+                  class="quick-add-btn primary"
+                  @click=${() => this._onAddPlant("coal_boiler")}
+                >
+                  <ha-icon icon="mdi:fire"></ha-icon>
+                  + ${this._t("Dodaj piec ekogroszek", "Add coal boiler")}
+                </button>
+                <button
+                  type="button"
+                  class="quick-add-btn"
+                  @click=${() => this._onAddPlant("fireplace")}
+                >
+                  <ha-icon icon="mdi:fireplace"></ha-icon>
+                  + ${this._t("Dodaj kominek", "Add fireplace")}
+                </button>
+                <button
+                  type="button"
+                  class="quick-add-btn"
+                  @click=${() => this._onAddPlant("underfloor_manifold")}
+                >
+                  <ha-icon icon="mdi:waves"></ha-icon>
+                  + ${this._t("Dodaj podłogówkę", "Add underfloor")}
+                </button>
+              </div>
             </ha-card>`
           : html`<div class="plants-grid">
               ${this.heatPlants.map((plant) =>
@@ -496,39 +728,60 @@ export class RsHeatPlants extends LitElement {
     const unit = tempUnit(this.hass);
     const fmtTemp = (v: number | null | undefined) =>
       v != null ? `${formatTempLocale(v, this.hass, 1, 1)}\u00a0${unit}` : "--";
-    const isActive =
-      live?.source_active ||
-      live?.state === "heating" ||
-      live?.state === "dhw" ||
-      live?.state === "heating_and_dhw";
     const isOverheat = live?.overheat_protect ?? false;
+    const isHold = live?.state === "hold" || !!live?.in_fire_hold;
+    const isActive =
+      !isHold &&
+      (live?.source_active ||
+        live?.state === "heating" ||
+        live?.state === "dhw" ||
+        live?.state === "heating_and_dhw");
+    const statusCls = isOverheat ? "overheat" : isHold ? "hold" : isActive ? "active" : "";
     const isSolidFuel =
       plant.fuel_type === "coal" || plant.fuel_type === "pellet" || plant.fuel_type === "wood";
     const chemKwhKg = plant.calorific_value_mj_kg / 3.6;
     const usableKwhKg = chemKwhKg * (plant.efficiency_pct / 100);
     const fuelUnit =
-      live?.fuel_unit ??
-      (isSolidFuel ? "kg" : plant.fuel_type === "gas" ? "m³" : "kWh");
+      live?.fuel_unit ?? (isSolidFuel ? "kg" : plant.fuel_type === "gas" ? "m³" : "kWh");
+    const parentPlant = plant.parent_plant_id
+      ? this.heatPlants.find((p) => p.id === plant.parent_plant_id)
+      : null;
 
     return html`<ha-card class="plant-card">
       <div class="plant-top">
-        <div class="plant-icon ${isOverheat ? "overheat" : isActive ? "active" : ""}">
+        <div class="plant-icon ${statusCls}">
           <ha-icon .icon=${this._plantIcon(plant.plant_type)}></ha-icon>
         </div>
         <div class="plant-heading">
           <h3>
             <span>${plant.name || this._plantTypeLabel(plant.plant_type)}</span>
-            <span class="status-pill ${isOverheat ? "overheat" : isActive ? "active" : ""}">
+            <span class="status-pill ${statusCls}">
               ${this._stateLabel(live?.state, plant.enabled)}
-              ${
-                isActive && live?.mean_power_pct
-                  ? ` · ${live.mean_power_pct}%`
-                  : ""
-              }
+              ${(isActive || isHold) && live?.mean_power_pct ? ` · ${live.mean_power_pct}%` : ""}
             </span>
+            ${
+              plant.cannot_extinguish
+                ? html`<span class="status-pill tag"
+                    >${this._t("Stały żar / Podtrzymanie", "Fire-hold safe")}</span
+                  >`
+                : nothing
+            }
+            ${
+              (plant.priority ?? 1) > 1
+                ? html`<span class="status-pill tag"
+                    >${this._t("Priorytet", "Priority")} ${plant.priority}</span
+                  >`
+                : nothing
+            }
           </h3>
           <div class="plant-sub">
             ${this._plantTypeLabel(plant.plant_type)}
+            ${parentPlant ? ` · ${this._t("Zasilane z", "Fed by")}: ${parentPlant.name}` : ""}
+            ${
+              live?.assisted_by?.length
+                ? ` · ${this._t("Wspomagane przez", "Assisted by")}: ${live.assisted_by.join(", ")}`
+                : ""
+            }
             ${
               plant.source_entity
                 ? ` · ${this._entityFriendlyName(plant.source_entity)}`
@@ -543,7 +796,7 @@ export class RsHeatPlants extends LitElement {
         ></rs-icon-button>
       </div>
 
-      <!-- Thermometers: Supply, Return, Delta-T, DHW (CWU), Flue -->
+      <!-- Thermometers & Pumps -->
       <div class="metrics-grid">
         <div class="metric-tile">
           <span class="metric-label">
@@ -552,10 +805,11 @@ export class RsHeatPlants extends LitElement {
           </span>
           <span class="metric-val">${fmtTemp(live?.supply_temp)}</span>
           <span class="metric-sub">
+            ${this._t("Zadana", "Target")}: ${fmtTemp(plant.target_supply_temp)}
             ${
-              plant.target_supply_temp
-                ? `${this._t("Zadana", "Target")}: ${fmtTemp(plant.target_supply_temp)}`
-                : this._t("Brak czujnika", "No sensor")
+              plant.cannot_extinguish
+                ? ` · ${this._t("Podtrzym.", "Hold")}: ${fmtTemp(plant.idle_supply_temp)}`
+                : ""
             }
           </span>
         </div>
@@ -569,23 +823,27 @@ export class RsHeatPlants extends LitElement {
           <span class="metric-sub">
             ${
               live?.delta_t != null
-                ? `ΔT (Zasilanie−Powrót): ${formatNumber(live.delta_t, this.hass, 1)} K`
+                ? `ΔT: ${formatNumber(live.delta_t, this.hass, 1)} K`
                 : this._t("ΔT niedostępne", "ΔT unavailable")
             }
           </span>
         </div>
 
-        <div class="metric-tile">
-          <span class="metric-label">
-            <ha-icon icon="mdi:water-thermometer"></ha-icon>
-            ${this._t("Ciepła woda (CWU)", "DHW (CWU)")}
-          </span>
-          <span class="metric-val">${fmtTemp(live?.dhw_temp)}</span>
-          <span class="metric-sub">
-            ${this._t("Zadana CWU", "DHW Target")}: ${fmtTemp(plant.dhw_target_temp)}
-            (±${plant.dhw_hysteresis} K)
-          </span>
-        </div>
+        ${
+          plant.dhw_temp_sensor || plant.dhw_pump_entity
+            ? html`<div class="metric-tile">
+                <span class="metric-label">
+                  <ha-icon icon="mdi:water-thermometer"></ha-icon>
+                  ${this._t("Ciepła woda (CWU)", "DHW (CWU)")}
+                </span>
+                <span class="metric-val">${fmtTemp(live?.dhw_temp)}</span>
+                <span class="metric-sub">
+                  ${this._t("Zadana CWU", "DHW Target")}: ${fmtTemp(plant.dhw_target_temp)}
+                  (±${plant.dhw_hysteresis} K)
+                </span>
+              </div>`
+            : nothing
+        }
 
         ${
           plant.flue_temp_sensor
@@ -600,7 +858,6 @@ export class RsHeatPlants extends LitElement {
             : nothing
         }
 
-        <!-- Circulation Pumps: C.O. & CWU -->
         <div class="metric-tile">
           <span class="metric-label">
             <ha-icon icon="mdi:pump"></ha-icon>
@@ -619,47 +876,43 @@ export class RsHeatPlants extends LitElement {
             ${
               live?.ch_pump_blocked_cold
                 ? this._t(
-                    `Czeka na nagrzanie (> ${plant.ch_pump_min_supply_temp}°C)`,
-                    `Waiting for supply > ${plant.ch_pump_min_supply_temp}°C`,
+                    `Czeka > ${plant.ch_pump_min_supply_temp}°C`,
+                    `Waiting > ${plant.ch_pump_min_supply_temp}°C`,
                   )
                 : `${this._t("Start od", "Start >")} ${plant.ch_pump_min_supply_temp}°C`
             }
           </span>
         </div>
 
-        <div class="metric-tile">
-          <span class="metric-label">
-            <ha-icon icon="mdi:pump"></ha-icon>
-            ${this._t("Pompa CWU", "DHW Pump")}
-          </span>
-          <span class="metric-val">
-            ${
-              !plant.dhw_pump_entity
-                ? "--"
-                : live?.dhw_pump_active
-                  ? this._t("Włączona", "Running")
-                  : this._t("Wyłączona", "Off")
-            }
-          </span>
-          <span class="metric-sub">
-            ${
-              live?.dhw_pump_blocked_cold
-                ? this._t("Zasilanie zimniejsze niż CWU", "Supply colder than DHW")
-                : plant.dhw_pump_entity
-                  ? this._entityFriendlyName(plant.dhw_pump_entity)
-                  : this._t("Nie przypisano", "Not assigned")
-            }
-          </span>
-        </div>
+        ${
+          plant.dhw_pump_entity
+            ? html`<div class="metric-tile">
+                <span class="metric-label">
+                  <ha-icon icon="mdi:pump"></ha-icon>
+                  ${this._t("Pompa CWU", "DHW Pump")}
+                </span>
+                <span class="metric-val">
+                  ${live?.dhw_pump_active ? this._t("Włączona", "Running") : this._t("Wyłączona", "Off")}
+                </span>
+                <span class="metric-sub">
+                  ${
+                    live?.dhw_pump_blocked_cold
+                      ? this._t("Zasilanie zimniejsze niż CWU", "Supply colder than DHW")
+                      : this._entityFriendlyName(plant.dhw_pump_entity)
+                  }
+                </span>
+              </div>`
+            : nothing
+        }
       </div>
 
-      <!-- Energy, Coal Calorific Value & Cost Telemetry -->
+      <!-- Energy, Fuel kg Counting & Cost Telemetry -->
       <div class="section-box">
         <div class="section-title">
           <span>
             ${this._t(
-              "Obserwacja kosztów spalania energii i kaloryczności",
-              "Fuel Calorific Value & Energy Cost Telemetry",
+              "Spalony opał (kg), kaloryczność i koszty energii",
+              "Fuel Burned (kg), Calorific Value & Energy Costs",
             )}
           </span>
           <button
@@ -683,9 +936,8 @@ export class RsHeatPlants extends LitElement {
                     ${formatNumber(plant.calorific_value_mj_kg, this.hass, 1)} MJ/kg
                   </span>
                   <span class="metric-sub">
-                    ${formatNumber(chemKwhKg, this.hass, 2)} kWh/kg
-                    (${this._t("użyteczne", "usable")}:
-                    ${formatNumber(usableKwhKg, this.hass, 2)} kWh/kg @ ${plant.efficiency_pct}%)
+                    ${formatNumber(chemKwhKg, this.hass, 2)} kWh/kg (${this._t("użyt.", "usable")}:
+                    ${formatNumber(usableKwhKg, this.hass, 2)} kWh/kg)
                   </span>
                 </div>`
               : plant.plant_type === "heat_pump"
@@ -695,9 +947,7 @@ export class RsHeatPlants extends LitElement {
                       ${this._t("Sprawność (COP)", "Efficiency (COP)")}
                     </span>
                     <span class="metric-val">COP ${formatNumber(plant.cop, this.hass, 2)}</span>
-                    <span class="metric-sub">
-                      ${this._t("Moc grzewcza", "Nominal")}: ${plant.nominal_power_kw} kW
-                    </span>
+                    <span class="metric-sub">${plant.nominal_power_kw} kW</span>
                   </div>`
                 : html`<div class="metric-tile">
                     <span class="metric-label">
@@ -705,20 +955,14 @@ export class RsHeatPlants extends LitElement {
                       ${this._t("Sprawność źródła", "Source Efficiency")}
                     </span>
                     <span class="metric-val">${plant.efficiency_pct}%</span>
-                    <span class="metric-sub">
-                      ${
-                        plant.fuel_type === "gas"
-                          ? `${formatNumber(plant.calorific_value_kwh_m3, this.hass, 1)} kWh/m³`
-                          : `${plant.nominal_power_kw} kW`
-                      }
-                    </span>
+                    <span class="metric-sub">${plant.nominal_power_kw} kW</span>
                   </div>`
           }
 
           <div class="metric-tile">
             <span class="metric-label">
               <ha-icon icon="mdi:flash"></ha-icon>
-              ${this._t("Moc i spalanie chwilowe", "Current Power & Burn Rate")}
+              ${this._t("Moc i spalanie chwilowe", "Power & Burn Rate")}
             </span>
             <span class="metric-val">
               ${formatNumber(live?.current_thermal_kw ?? 0, this.hass, 2)} kW
@@ -732,16 +976,15 @@ export class RsHeatPlants extends LitElement {
           <div class="metric-tile">
             <span class="metric-label">
               <ha-icon icon="mdi:scale-balance"></ha-icon>
-              ${this._t("Zużycie (Dzisiaj / Łącznie)", "Consumption (Today / Total)")}
+              ${this._t("Spalony opał (Dziś / Łącznie)", "Fuel Burned (Today / Total)")}
             </span>
             <span class="metric-val">
               ${formatNumber(live?.fuel_consumed_today ?? 0, this.hass, 2)} ${fuelUnit}
             </span>
             <span class="metric-sub">
               ${this._t("Łącznie", "Total")}:
-              ${formatNumber(live?.fuel_consumed_total ?? 0, this.hass, 1)} ${fuelUnit}
-              (${formatNumber(live?.thermal_kwh_today ?? 0, this.hass, 1)} kWh
-              ${this._t("ciepła dziś", "heat today")})
+              ${formatNumber(live?.fuel_consumed_total ?? 0, this.hass, 1)} ${fuelUnit} ·
+              ${formatNumber(live?.thermal_kwh_today ?? 0, this.hass, 1)} kWh
             </span>
           </div>
 
@@ -761,6 +1004,8 @@ export class RsHeatPlants extends LitElement {
             </span>
           </div>
         </div>
+
+        ${isSolidFuel ? this._renderFuelLogAndMaintenance(plant, live) : nothing}
       </div>
 
       <!-- Assigned Radiators & Heating Systems -->
@@ -768,8 +1013,8 @@ export class RsHeatPlants extends LitElement {
         <div class="section-title">
           <span>
             ${this._t(
-              "Obsługiwane kaloryfery i ogrzewania",
-              "Served Radiators & Heating Systems",
+              "Obsługiwane kaloryfery, podłogówka i pokoje",
+              "Served Radiators, Underfloor & Rooms",
             )}
           </span>
           <span>
@@ -788,6 +1033,152 @@ export class RsHeatPlants extends LitElement {
     </ha-card>`;
   }
 
+  private _renderFuelLogAndMaintenance(plant: HeatPlantConfig, live?: HeatPlantLive) {
+    const hopperPct = live?.hopper_pct ?? 100;
+    const remKg = live?.fuel_remaining_kg ?? plant.hopper_capacity_kg ?? 100;
+    const ashPct = live?.ash_fill_pct ?? 0;
+    const chimneyPct = live?.chimney_wear_pct ?? 0;
+    const kgInput = this._fuelInputKg[plant.id] ?? (plant.plant_type === "fireplace" ? 5 : 25);
+
+    return html`
+      <div class="fuel-log-row">
+        <span><b>${this._t("Rejestr opału (kg):", "Manual fuel log (kg):")}</b></span>
+        <input
+          class="fuel-log-input"
+          type="number"
+          min="0.5"
+          max="1000"
+          step="0.5"
+          .value=${String(kgInput)}
+          @input=${(e: Event) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            if (Number.isFinite(val) && val > 0) {
+              this._fuelInputKg = { ...this._fuelInputKg, [plant.id]: val };
+            }
+          }}
+        />
+        <span>kg</span>
+        <button
+          type="button"
+          class="preset-btn accent"
+          @click=${() => this._onLogFuel(plant.id, kgInput, "refill")}
+        >
+          + ${this._t("Zasyp / Dołóż do zasobnika", "Refill hopper")}
+        </button>
+        <button
+          type="button"
+          class="preset-btn"
+          @click=${() => this._onLogFuel(plant.id, kgInput, "burned")}
+        >
+          + ${this._t("Zapisz jako spalone (kg)", "Log as burned (kg)")}
+        </button>
+      </div>
+
+      <div class="maint-grid" style="margin-top: 10px">
+        <!-- 1. Hopper / Refill -->
+        <div class="maint-card ${live?.refill_needed ? "alert" : ""}">
+          <div class="maint-head">
+            <span class="maint-head-left">
+              <ha-icon icon="mdi:silo"></ha-icon>
+              ${this._t("Zasobnik / Dołożenie opału", "Hopper / Refuel")}
+            </span>
+            <b>${formatNumber(remKg, this.hass, 1)} kg (${Math.round(hopperPct)}%)</b>
+          </div>
+          <div class="maint-bar">
+            <i
+              class=${live?.refill_needed ? "err" : hopperPct < 35 ? "warn" : ""}
+              style="width: ${Math.max(4, Math.min(100, hopperPct))}%"
+            ></i>
+          </div>
+          <div class="metric-sub">
+            ${this._t("Spalono od zasypu", "Burned since refill")}:
+            ${formatNumber(live?.fuel_since_refill_kg ?? 0, this.hass, 1)} kg
+            ${
+              live?.hours_until_refill != null
+                ? ` · ~${formatNumber(live.hours_until_refill, this.hass, 1)} h`
+                : ""
+            }
+          </div>
+          <div class="maint-actions">
+            <button
+              type="button"
+              class="preset-btn accent"
+              @click=${() => this._onMaintenance(plant.id, "refill")}
+            >
+              ${this._t("Dołożono do pełna", "Refilled to full")}
+            </button>
+          </div>
+        </div>
+
+        <!-- 2. Ash Container -->
+        <div class="maint-card ${live?.ash_clean_needed ? "alert" : ""}">
+          <div class="maint-head">
+            <span class="maint-head-left">
+              <ha-icon icon="mdi:delete-variant"></ha-icon>
+              ${this._t("Zbiornik na popiół", "Ash Container")}
+            </span>
+            <b>${Math.round(ashPct)}% (~${formatNumber(live?.estimated_ash_kg ?? 0, this.hass, 1)} kg)</b>
+          </div>
+          <div class="maint-bar">
+            <i
+              class=${live?.ash_clean_needed ? "err" : ashPct >= 75 ? "warn" : ""}
+              style="width: ${Math.max(2, Math.min(100, ashPct))}%"
+            ></i>
+          </div>
+          <div class="metric-sub">
+            ${this._t("Spalono", "Burned")}:
+            ${formatNumber(live?.fuel_since_ash_clean_kg ?? 0, this.hass, 1)} /
+            ${plant.ash_clean_interval_kg ?? 150} kg ·
+            ${formatNumber(live?.days_since_ash_clean ?? 0, this.hass, 0)}
+            ${this._t("dni", "days")}
+          </div>
+          <div class="maint-actions">
+            <button
+              type="button"
+              class="preset-btn accent"
+              @click=${() => this._onMaintenance(plant.id, "ash_cleaned")}
+            >
+              ${this._t("Popielnik opróżniony", "Ash tray emptied")}
+            </button>
+          </div>
+        </div>
+
+        <!-- 3. Chimney Cleaning -->
+        <div class="maint-card ${live?.chimney_clean_needed ? "alert" : ""}">
+          <div class="maint-head">
+            <span class="maint-head-left">
+              <ha-icon icon="mdi:chimney"></ha-icon>
+              ${this._t("Czyszczenie komina", "Chimney Cleaning")}
+            </span>
+            <b>${Math.round(chimneyPct)}%</b>
+          </div>
+          <div class="maint-bar">
+            <i
+              class=${live?.chimney_clean_needed ? "err" : chimneyPct >= 80 ? "warn" : ""}
+              style="width: ${Math.max(2, Math.min(100, chimneyPct))}%"
+            ></i>
+          </div>
+          <div class="metric-sub">
+            ${this._t("Spalono", "Burned")}:
+            ${formatNumber(live?.fuel_since_chimney_clean_kg ?? 0, this.hass, 0)} /
+            ${plant.chimney_clean_interval_kg ?? 1000} kg ·
+            ${formatNumber(live?.days_since_chimney_clean ?? 0, this.hass, 0)} /
+            ${plant.chimney_clean_interval_days ?? 90} ${this._t("dni", "days")}
+          </div>
+          <div class="maint-actions">
+            <button
+              type="button"
+              class="preset-btn accent"
+              @click=${() => this._onMaintenance(plant.id, "chimney_cleaned")}
+            >
+              ${this._t("Komin wyczyszczony", "Chimney cleaned")}
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   private _renderAssignedRadiators(plant: HeatPlantConfig, live?: HeatPlantLive) {
     const activeDevs = new Set(live?.active_devices ?? []);
     const demandingRooms = new Set(live?.demanding_rooms ?? []);
@@ -802,7 +1193,7 @@ export class RsHeatPlants extends LitElement {
           @click=${() => openEntityInfo(this, eid)}
           style="cursor: pointer"
         >
-          <ha-icon icon=${heating ? "mdi:radiator" : "mdi:radiator-Disabled"}></ha-icon>
+          <ha-icon icon=${heating ? "mdi:radiator" : "mdi:radiator-disabled"}></ha-icon>
           <span>${this._entityFriendlyName(eid)}</span>
           ${roomName ? html`<small>(${roomName})</small>` : nothing}
         </span>
@@ -826,8 +1217,8 @@ export class RsHeatPlants extends LitElement {
     if (chips.length === 0) {
       return html`<p class="plant-sub">
         ${this._t(
-          "Nie przypisano jeszcze żadnych kaloryferów ani pokoi. Kliknij ikonę edycji, aby wybrać obsługiwane grzejniki i ogrzewania.",
-          "No radiators or rooms assigned yet. Click the edit button to choose served radiators and heating systems.",
+          "Nie przypisano jeszcze żadnych kaloryferów ani pokoi. Kliknij ikonę edycji, aby wybrać obsługiwane grzejniki, podłogówkę i pokoje.",
+          "No radiators or rooms assigned yet. Click the edit button to choose served radiators, underfloor loops, and rooms.",
         )}
       </p>`;
     }
@@ -842,8 +1233,8 @@ export class RsHeatPlants extends LitElement {
     const usableKwh = ((draft.calorific_value_mj_kg / 3.6) * (draft.efficiency_pct / 100)).toFixed(
       2,
     );
-
     const allRoomDevices = this._collectAllRoomHeatingDevices();
+    const otherPlants = this.heatPlants.filter((p) => p.id !== draft.id);
 
     return html`<rs-edit-dialog
       open
@@ -852,9 +1243,9 @@ export class RsHeatPlants extends LitElement {
       @rs-dialog-closed=${this._closeDialog}
     >
       <div class="dialog-body">
-        <!-- Basic identity & type -->
+        <!-- Basic identity, type, priority & non-extinguishable protection -->
         <section class="group">
-          <h4 class="group-title">${this._t("Podstawowe informacje", "General")}</h4>
+          <h4 class="group-title">${this._t("Podstawowe informacje i współpraca źródeł", "General & Multi-Source Priority")}</h4>
           <div class="pair">
             <ha-textfield
               .label=${this._t("Nazwa źródła ciepła", "Heat source name")}
@@ -864,13 +1255,13 @@ export class RsHeatPlants extends LitElement {
             ></ha-textfield>
 
             <rs-number-field
-              .label=${this._t("Min. liczba pokoi do startu", "Min demanding rooms to start")}
+              .label=${this._t("Priorytet źródła (1 = najwyższy, np. kominek)", "Source priority (1 = highest, e.g. fireplace)")}
               .min=${1}
-              .max=${50}
+              .max=${20}
               .step=${1}
-              .value=${draft.min_rooms_demand}
+              .value=${draft.priority ?? 1}
               @value-changed=${(e: CustomEvent<{ value: number }>) =>
-                this._updateDraft({ min_rooms_demand: e.detail.value })}
+                this._updateDraft({ priority: e.detail.value })}
             ></rs-number-field>
           </div>
 
@@ -879,19 +1270,46 @@ export class RsHeatPlants extends LitElement {
               wrap
               .label=${this._t("Typ urządzenia", "Plant type")}
               .options=${[
-                { value: "coal_boiler", label: this._t("Piec węglowy", "Coal boiler") },
-                { value: "pellet_boiler", label: this._t("Kocioł na pellet", "Pellet boiler") },
+                { value: "coal_boiler", label: this._t("Piec ekogroszek", "Coal boiler") },
+                { value: "fireplace", label: this._t("Kominek", "Fireplace") },
+                { value: "underfloor_manifold", label: this._t("Podłogówka", "Underfloor") },
+                { value: "pellet_boiler", label: this._t("Pellet", "Pellet") },
                 { value: "wood_boiler", label: this._t("Kocioł drzewny", "Wood boiler") },
-                { value: "gas_boiler", label: this._t("Kocioł gazowy", "Gas boiler") },
-                { value: "air_heater", label: this._t("Nagrzewnica", "Air heater") },
-                { value: "electric_heater", label: this._t("Kocioł elektr.", "Electric") },
+                { value: "gas_boiler", label: this._t("Gazowy", "Gas") },
                 { value: "heat_pump", label: this._t("Pompa ciepła", "Heat pump") },
+                { value: "electric_heater", label: this._t("Elektr.", "Electric") },
+                { value: "air_heater", label: this._t("Nagrzewnica", "Air heater") },
               ]}
               .value=${draft.plant_type}
               @value-changed=${(e: CustomEvent<{ value: string }>) =>
                 this._onPlantTypeChanged(e.detail.value as HeatPlantType)}
             ></rs-segmented>
           </rs-field>
+
+          ${
+            otherPlants.length > 0
+              ? html`<rs-field
+                  .label=${this._t(
+                    "Źródło nadrzędne (np. podłogówka zasilana z pieca na ekogroszek)",
+                    "Parent heat source (e.g. underfloor fed by main boiler)",
+                  )}
+                >
+                  <select
+                    class="parent-select"
+                    .value=${draft.parent_plant_id ?? ""}
+                    @change=${(e: Event) =>
+                      this._updateDraft({ parent_plant_id: (e.target as HTMLSelectElement).value })}
+                  >
+                    <option value="">${this._t("Brak (niezależne źródło)", "None (independent)")}</option>
+                    ${otherPlants.map(
+                      (p) => html`<option value=${p.id} ?selected=${draft.parent_plant_id === p.id}>
+                        ${p.name}
+                      </option>`,
+                    )}
+                  </select>
+                </rs-field>`
+              : nothing
+          }
 
           <rs-list-row
             switch
@@ -900,6 +1318,50 @@ export class RsHeatPlants extends LitElement {
             @toggle-changed=${(e: CustomEvent<boolean>) =>
               this._updateDraft({ enabled: e.detail })}
           ></rs-list-row>
+
+          <rs-list-row
+            switch
+            .heading=${this._t(
+              "Nie można całkowicie wygasić (tryb podtrzymania ognia)",
+              "Cannot be fully extinguished (fire-hold mode)",
+            )}
+            .secondary=${this._t(
+              "Dla pieca na ekogroszek, kominka i kotłów stałopalnych — RoomMind nigdy nie wyłączy źródła na postoju, lecz przejdzie w bezpieczne podtrzymanie.",
+              "For coal boilers, fireplaces, and wood boilers — RoomMind never sends OFF on idle, keeping a safe fire-hold temperature instead.",
+            )}
+            .checked=${draft.cannot_extinguish ?? false}
+            @toggle-changed=${(e: CustomEvent<boolean>) =>
+              this._updateDraft({
+                cannot_extinguish: e.detail,
+                off_mode: e.detail ? "temperature" : draft.off_mode,
+              })}
+          ></rs-list-row>
+
+          <div class="pair">
+            <rs-number-field
+              .label=${this._t("Min. liczba pokoi do startu", "Min demanding rooms to start")}
+              .min=${1}
+              .max=${50}
+              .step=${1}
+              .value=${draft.min_rooms_demand}
+              @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                this._updateDraft({ min_rooms_demand: e.detail.value })}
+            ></rs-number-field>
+            ${
+              draft.cannot_extinguish
+                ? html`<rs-number-field
+                    .label=${this._t("Moc podtrzymania ognia (%)", "Fire-hold standby power (%)")}
+                    suffix="%"
+                    .min=${0}
+                    .max=${50}
+                    .step=${1}
+                    .value=${draft.min_power_pct ?? 12}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ min_power_pct: e.detail.value })}
+                  ></rs-number-field>`
+                : nothing
+            }
+          </div>
         </section>
 
         <!-- Assigned radiators & heating systems -->
@@ -910,12 +1372,6 @@ export class RsHeatPlants extends LitElement {
               "Served Radiators, Underfloor Heating & Rooms",
             )}
           </h4>
-          <p class="note">
-            ${this._t(
-              "Zaznacz grzejniki (głowice TRV), ogrzewania podłogowe, nagrzewnice lub całe pokoje zasilane przez to źródło ciepła.",
-              "Select radiators (TRVs), underfloor heating, heaters, or entire rooms supplied by this heat source.",
-            )}
-          </p>
           <div class="radiator-list">
             ${allRoomDevices.map((item) => {
               const checked = draft.assigned_devices.includes(item.entityId);
@@ -979,8 +1435,8 @@ export class RsHeatPlants extends LitElement {
         <section class="group">
           <h4 class="group-title">
             ${this._t(
-              "Sterowanie piecem / pompą ciepła / nagrzewnicą",
-              "Boiler / Heat Pump / Heater Control Entity",
+              "Sterowanie piecem / kominkiem / podłogówką",
+              "Boiler / Fireplace / Manifold Control Entity",
             )}
           </h4>
           <ha-entity-picker
@@ -1006,10 +1462,15 @@ export class RsHeatPlants extends LitElement {
                 this._updateDraft({ target_supply_temp: e.detail.value })}
             ></rs-number-field>
             <rs-number-field
-              .label=${this._t("Temp. zasilania w czuwaniu", "Idle supply temp")}
+              .label=${this._t(
+                draft.cannot_extinguish
+                  ? "Temp. zasilania w podtrzymaniu ognia"
+                  : "Temp. zasilania w czuwaniu",
+                draft.cannot_extinguish ? "Fire-hold supply temp" : "Idle supply temp",
+              )}
               suffix="°C"
-              .min=${10}
-              .max=${70}
+              .min=${15}
+              .max=${75}
               .step=${1}
               .value=${draft.idle_supply_temp}
               @value-changed=${(e: CustomEvent<{ value: number }>) =>
@@ -1099,7 +1560,7 @@ export class RsHeatPlants extends LitElement {
             <rs-number-field
               .label=${this._t("Awaryjny start pompy C.O. (przegrzanie)", "Overheat emergency C.O. pump temp")}
               suffix="°C"
-              .min=${50}
+              .min=${45}
               .max=${99}
               .step=${1}
               .value=${draft.ch_pump_overrun_temp}
@@ -1129,12 +1590,12 @@ export class RsHeatPlants extends LitElement {
           </div>
         </section>
 
-        <!-- Fuel Calorific Value & Energy Cost Settings -->
+        <!-- Fuel, kg Counting, Feeder Screw & Costs -->
         <section class="group">
           <h4 class="group-title">
             ${this._t(
-              "Paliwo, kaloryczność węgla/opału i koszty energii",
-              "Fuel, Coal Calorific Value & Energy Costs",
+              "Paliwo, liczenie spalonego opału (kg) i koszty energii",
+              "Fuel, Burned Fuel Counting (kg) & Energy Costs",
             )}
           </h4>
           <rs-field .label=${this._t("Rodzaj paliwa / energii", "Fuel / energy type")}>
@@ -1159,10 +1620,7 @@ export class RsHeatPlants extends LitElement {
               ? html`
                   <div>
                     <div class="metric-label">
-                      ${this._t(
-                        "Szybki wybór kaloryczności opału:",
-                        "Quick fuel calorific presets:",
-                      )}
+                      ${this._t("Szybki wybór kaloryczności opału:", "Quick fuel calorific presets:")}
                     </div>
                     <div class="preset-bar">
                       ${COAL_AND_FUEL_PRESETS.map(
@@ -1175,6 +1633,7 @@ export class RsHeatPlants extends LitElement {
                                 fuel_type: p.fuelType,
                                 calorific_value_mj_kg: p.mjKg,
                                 efficiency_pct: p.efficiency,
+                                ash_content_pct: p.ashPct,
                               })}
                           >
                             ${this._isPl ? p.labelPl : p.labelEn}
@@ -1185,7 +1644,7 @@ export class RsHeatPlants extends LitElement {
                   </div>
                   <div class="pair">
                     <rs-number-field
-                      .label=${this._t("Kaloryczność węgla / paliwa", "Fuel calorific value")}
+                      .label=${this._t("Kaloryczność opału", "Fuel calorific value")}
                       suffix="MJ/kg"
                       .min=${5}
                       .max=${40}
@@ -1195,7 +1654,7 @@ export class RsHeatPlants extends LitElement {
                         this._updateDraft({ calorific_value_mj_kg: e.detail.value })}
                     ></rs-number-field>
                     <rs-number-field
-                      .label=${this._t("Sprawność kotła", "Boiler efficiency")}
+                      .label=${this._t("Sprawność kotła / kominka", "Boiler / fireplace efficiency")}
                       suffix="%"
                       .min=${30}
                       .max=${105}
@@ -1207,10 +1666,30 @@ export class RsHeatPlants extends LitElement {
                   </div>
                   <p class="note">
                     ${this._t(
-                      `1 kg paliwa (${draft.calorific_value_mj_kg} MJ/kg) = ${chemKwh} kWh energii chemicznej → ${usableKwh} kWh użytecznego ciepła przy sprawności ${draft.efficiency_pct}%.`,
-                      `1 kg of fuel (${draft.calorific_value_mj_kg} MJ/kg) = ${chemKwh} kWh chemical energy → ${usableKwh} kWh usable heat at ${draft.efficiency_pct}% efficiency.`,
+                      `1 kg opału (${draft.calorific_value_mj_kg} MJ/kg) = ${chemKwh} kWh energii chemicznej → ${usableKwh} kWh ciepła użytecznego.`,
+                      `1 kg of fuel (${draft.calorific_value_mj_kg} MJ/kg) = ${chemKwh} kWh chemical → ${usableKwh} kWh usable heat.`,
                     )}
                   </p>
+                  <div class="pair">
+                    <ha-entity-picker
+                      .hass=${this.hass}
+                      .includeDomains=${["switch", "binary_sensor", "input_boolean"]}
+                      .label=${this._t("Podajnik ślimakowy (opcjonalnie — dokładne kg)", "Feeder / auger entity (exact kg)")}
+                      .value=${draft.feeder_entity ?? ""}
+                      @value-changed=${(e: CustomEvent) =>
+                        this._updateDraft({ feeder_entity: (e.detail?.value as string) ?? "" })}
+                    ></ha-entity-picker>
+                    <rs-number-field
+                      .label=${this._t("Wydajność podajnika", "Feeder throughput")}
+                      suffix="kg/h"
+                      .min=${0.5}
+                      .max=${100}
+                      .step=${0.5}
+                      .value=${draft.feeder_kg_per_hour ?? 12}
+                      @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                        this._updateDraft({ feeder_kg_per_hour: e.detail.value })}
+                    ></rs-number-field>
+                  </div>
                 `
               : draft.fuel_type === "gas"
                 ? html`<div class="pair">
@@ -1281,10 +1760,7 @@ export class RsHeatPlants extends LitElement {
             <ha-entity-picker
               .hass=${this.hass}
               .includeDomains=${["sensor", "input_number"]}
-              .label=${this._t(
-                "Sensor mocy (W/kW) lub energii (kWh) z HA",
-                "HA power (W/kW) or energy (kWh) sensor",
-              )}
+              .label=${this._t("Sensor mocy (W/kW) lub energii (kWh)", "HA power (W/kW) or energy (kWh) sensor")}
               .value=${draft.energy_sensor}
               @value-changed=${(e: CustomEvent) =>
                 this._updateDraft({ energy_sensor: (e.detail?.value as string) ?? "" })}
@@ -1292,16 +1768,147 @@ export class RsHeatPlants extends LitElement {
             <ha-entity-picker
               .hass=${this.hass}
               .includeDomains=${["sensor", "input_number"]}
-              .label=${this._t(
-                "Sensor zużycia paliwa z HA (kg węgla/pelletu lub m³)",
-                "HA fuel consumption sensor (kg coal/pellet or m³)",
-              )}
+              .label=${this._t("Sensor spalonego opału z HA (kg / g / m³)", "HA burned fuel sensor (kg / g / m³)")}
               .value=${draft.fuel_consumption_sensor}
               @value-changed=${(e: CustomEvent) =>
                 this._updateDraft({ fuel_consumption_sensor: (e.detail?.value as string) ?? "" })}
             ></ha-entity-picker>
           </div>
         </section>
+
+        <!-- Maintenance & Notifications (Refill, Ash Tray, Chimney Cleaning) -->
+        ${
+          isSolidFuel
+            ? html`<section class="group">
+                <h4 class="group-title">
+                  ${this._t(
+                    "Powiadomienia: Dołożenie opału, Popielnik i Czyszczenie komina",
+                    "Maintenance Notifications: Refill, Ash Tray & Chimney Cleaning",
+                  )}
+                </h4>
+                <div class="pair">
+                  <rs-number-field
+                    .label=${this._t("Pojemność zasobnika / załadunku", "Hopper / load capacity")}
+                    suffix="kg"
+                    .min=${1}
+                    .max=${5000}
+                    .step=${5}
+                    .value=${draft.hopper_capacity_kg ?? 100}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ hopper_capacity_kg: e.detail.value })}
+                  ></rs-number-field>
+                  <rs-number-field
+                    .label=${this._t("Zawartość popiołu w opale", "Fuel ash content")}
+                    suffix="%"
+                    .min=${0}
+                    .max=${40}
+                    .step=${0.5}
+                    .value=${draft.ash_content_pct ?? 7}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ ash_content_pct: e.detail.value })}
+                  ></rs-number-field>
+                </div>
+                <ha-entity-picker
+                  .hass=${this.hass}
+                  .includeDomains=${["sensor", "input_number"]}
+                  .label=${this._t("Opcjonalny czujnik poziomu opału w zasobniku (% lub kg)", "Optional hopper level sensor (% or kg)")}
+                  .value=${draft.hopper_level_sensor ?? ""}
+                  @value-changed=${(e: CustomEvent) =>
+                    this._updateDraft({ hopper_level_sensor: (e.detail?.value as string) ?? "" })}
+                ></ha-entity-picker>
+
+                <rs-list-row
+                  switch
+                  .heading=${this._t("Powiadomienie o dołożeniu opału do pieca", "Refuel / top-up notification")}
+                  .checked=${draft.notify_refill_enabled ?? false}
+                  @toggle-changed=${(e: CustomEvent<boolean>) =>
+                    this._updateDraft({ notify_refill_enabled: e.detail })}
+                ></rs-list-row>
+                <div class="pair">
+                  <rs-number-field
+                    .label=${this._t("Alert gdy pozostało mniej niż (kg)", "Alert below remaining (kg)")}
+                    suffix="kg"
+                    .min=${0}
+                    .max=${1000}
+                    .step=${1}
+                    .value=${draft.refill_alert_kg ?? 20}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ refill_alert_kg: e.detail.value })}
+                  ></rs-number-field>
+                  <rs-number-field
+                    .label=${this._t("Alert gdy poziom zasobnika ≤ (%)", "Alert below hopper level (%)")}
+                    suffix="%"
+                    .min=${0}
+                    .max=${100}
+                    .step=${5}
+                    .value=${draft.refill_alert_pct ?? 20}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ refill_alert_pct: e.detail.value })}
+                  ></rs-number-field>
+                </div>
+
+                <rs-list-row
+                  switch
+                  .heading=${this._t("Powiadomienie o posprzątaniu zbiornika na popiół", "Ash container emptying notification")}
+                  .checked=${draft.notify_ash_enabled ?? false}
+                  @toggle-changed=${(e: CustomEvent<boolean>) =>
+                    this._updateDraft({ notify_ash_enabled: e.detail })}
+                ></rs-list-row>
+                <div class="pair">
+                  <rs-number-field
+                    .label=${this._t("Interwał popielnika (kg spalonego opału)", "Ash interval (kg burned)")}
+                    suffix="kg"
+                    .min=${0}
+                    .max=${5000}
+                    .step=${10}
+                    .value=${draft.ash_clean_interval_kg ?? 150}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ ash_clean_interval_kg: e.detail.value })}
+                  ></rs-number-field>
+                  <rs-number-field
+                    .label=${this._t("Interwał popielnika (dni, 0 = wył.)", "Ash interval (days, 0 = off)")}
+                    .suffix=${this._t("dni", "d")}
+                    .min=${0}
+                    .max=${365}
+                    .step=${1}
+                    .value=${draft.ash_clean_interval_days ?? 7}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ ash_clean_interval_days: e.detail.value })}
+                  ></rs-number-field>
+                </div>
+
+                <rs-list-row
+                  switch
+                  .heading=${this._t("Powiadomienie o czyszczeniu komina", "Chimney cleaning notification")}
+                  .checked=${draft.notify_chimney_enabled ?? false}
+                  @toggle-changed=${(e: CustomEvent<boolean>) =>
+                    this._updateDraft({ notify_chimney_enabled: e.detail })}
+                ></rs-list-row>
+                <div class="pair">
+                  <rs-number-field
+                    .label=${this._t("Interwał komina (kg spalonego opału)", "Chimney interval (kg burned)")}
+                    suffix="kg"
+                    .min=${0}
+                    .max=${20000}
+                    .step=${50}
+                    .value=${draft.chimney_clean_interval_kg ?? 1000}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ chimney_clean_interval_kg: e.detail.value })}
+                  ></rs-number-field>
+                  <rs-number-field
+                    .label=${this._t("Interwał komina (dni, np. 90)", "Chimney interval (days, e.g. 90)")}
+                    .suffix=${this._t("dni", "d")}
+                    .min=${0}
+                    .max=${365}
+                    .step=${5}
+                    .value=${draft.chimney_clean_interval_days ?? 90}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ chimney_clean_interval_days: e.detail.value })}
+                  ></rs-number-field>
+                </div>
+              </section>`
+            : nothing
+        }
 
         <div class="footer-actions">
           <rs-confirm-button
@@ -1398,50 +2005,85 @@ export class RsHeatPlants extends LitElement {
     );
   }
 
-  private _onAddPlant = () => {
+  private _onAddPlant(presetType: HeatPlantType = "coal_boiler") {
     const id = `plant_${Date.now().toString(36)}`;
-    const allTrvs = this._collectAllRoomHeatingDevices()
-      .filter((d) => d.type === "trv")
-      .map((d) => d.entityId);
+    const allDevs = this._collectAllRoomHeatingDevices();
+    const trvs = allDevs.filter((d) => d.type === "trv").map((d) => d.entityId);
+    const isFireplace = presetType === "fireplace";
+    const isUnderfloor = presetType === "underfloor_manifold";
+    const isCoal = presetType === "coal_boiler";
+    const cannotExtinguish = isCoal || isFireplace || presetType === "wood_boiler";
+    const mainBoiler = this.heatPlants.find(
+      (p) => p.plant_type === "coal_boiler" || p.plant_type === "pellet_boiler" || p.plant_type === "gas_boiler",
+    );
+
     const newPlant: HeatPlantConfig = {
       id,
-      name: this._t("Piec C.O.", "Central Boiler"),
-      plant_type: "coal_boiler",
+      name: isFireplace
+        ? this._t("Kominek", "Fireplace")
+        : isUnderfloor
+          ? this._t("Ogrzewanie podłogowe", "Underfloor Heating")
+          : isCoal
+            ? this._t("Piec Ekogroszek", "Coal Boiler")
+            : this._t("Źródło ciepła", "Heat Source"),
+      plant_type: presetType,
       enabled: true,
-      assigned_devices: allTrvs,
+      priority: isFireplace ? 1 : isUnderfloor ? 2 : this.heatPlants.length + 1,
+      parent_plant_id: isUnderfloor && mainBoiler ? mainBoiler.id : "",
+      cannot_extinguish: cannotExtinguish,
+      min_power_pct: cannotExtinguish ? 12 : 0,
+      assigned_devices: isCoal ? trvs : [],
       assigned_rooms: [],
       source_entity: "",
-      target_supply_temp: 55,
-      idle_supply_temp: 35,
-      off_mode: "off",
+      target_supply_temp: isUnderfloor ? 35 : isFireplace ? 60 : 55,
+      idle_supply_temp: isUnderfloor ? 24 : cannotExtinguish ? 42 : 35,
+      off_mode: cannotExtinguish ? "temperature" : "off",
       min_rooms_demand: 1,
       supply_temp_sensor: "",
       return_temp_sensor: "",
       dhw_temp_sensor: "",
       flue_temp_sensor: "",
       ch_pump_entity: "",
-      ch_pump_min_supply_temp: 40,
-      ch_pump_overrun_temp: 80,
+      ch_pump_min_supply_temp: isUnderfloor ? 25 : presetType === "heat_pump" ? 20 : 40,
+      ch_pump_overrun_temp: isUnderfloor ? 50 : 80,
       dhw_pump_entity: "",
       dhw_target_temp: 50,
       dhw_hysteresis: 3,
       dhw_min_supply_delta: 3,
-      fuel_type: "coal",
-      calorific_value_mj_kg: 26.0,
+      fuel_type: isFireplace
+        ? "wood"
+        : presetType === "heat_pump"
+          ? "electricity"
+          : "coal",
+      calorific_value_mj_kg: isFireplace ? 14.5 : 26.0,
       calorific_value_kwh_m3: 10.5,
-      efficiency_pct: 85,
+      efficiency_pct: isFireplace ? 75 : isUnderfloor ? 95 : 85,
       cop: 3.5,
-      nominal_power_kw: 15.0,
-      fuel_price: 1500,
+      nominal_power_kw: isFireplace ? 12.0 : isUnderfloor ? 8.0 : 15.0,
+      fuel_price: isFireplace ? 600 : presetType === "heat_pump" ? 1.1 : 1500,
       currency: "PLN",
       energy_sensor: "",
       fuel_consumption_sensor: "",
+      feeder_entity: "",
+      feeder_kg_per_hour: 12.0,
+      hopper_capacity_kg: isFireplace ? 20 : 100,
+      hopper_level_sensor: "",
+      ash_content_pct: isFireplace ? 1.5 : 7.0,
+      notify_refill_enabled: isCoal || isFireplace,
+      refill_alert_kg: isFireplace ? 5 : 20,
+      refill_alert_pct: 20,
+      notify_ash_enabled: isCoal || isFireplace,
+      ash_clean_interval_kg: isFireplace ? 50 : 150,
+      ash_clean_interval_days: 7,
+      notify_chimney_enabled: isCoal || isFireplace,
+      chimney_clean_interval_kg: isFireplace ? 500 : 1000,
+      chimney_clean_interval_days: 90,
     };
     const next = [...this.heatPlants, newPlant];
     this._editingId = id;
     this._draft = { ...newPlant };
     void this._savePlants(next);
-  };
+  }
 
   private _onEditPlant(plant: HeatPlantConfig) {
     this._editingId = plant.id;
@@ -1459,14 +2101,129 @@ export class RsHeatPlants extends LitElement {
 
   private _onPlantTypeChanged(plantType: HeatPlantType) {
     if (!this._draft) return;
-    const fuelDefaults: Record<HeatPlantType, { fuel: FuelType; mj: number; eff: number; price: number }> = {
-      coal_boiler: { fuel: "coal", mj: 26.0, eff: 85, price: 1500 },
-      pellet_boiler: { fuel: "pellet", mj: 18.0, eff: 90, price: 1400 },
-      wood_boiler: { fuel: "wood", mj: 14.5, eff: 78, price: 600 },
-      gas_boiler: { fuel: "gas", mj: 26.0, eff: 96, price: 3.5 },
-      electric_heater: { fuel: "electricity", mj: 26.0, eff: 99, price: 1.1 },
-      air_heater: { fuel: "electricity", mj: 26.0, eff: 95, price: 1.1 },
-      heat_pump: { fuel: "electricity", mj: 26.0, eff: 100, price: 1.1 },
+    const fuelDefaults: Record<
+      HeatPlantType,
+      {
+        fuel: FuelType;
+        mj: number;
+        eff: number;
+        price: number;
+        cannotExt: boolean;
+        ashPct: number;
+        supply: number;
+        idle: number;
+        pumpMin: number;
+        overrun: number;
+      }
+    > = {
+      coal_boiler: {
+        fuel: "coal",
+        mj: 26.0,
+        eff: 85,
+        price: 1500,
+        cannotExt: true,
+        ashPct: 7.0,
+        supply: 55,
+        idle: 42,
+        pumpMin: 40,
+        overrun: 80,
+      },
+      pellet_boiler: {
+        fuel: "pellet",
+        mj: 18.0,
+        eff: 90,
+        price: 1400,
+        cannotExt: false,
+        ashPct: 0.7,
+        supply: 55,
+        idle: 38,
+        pumpMin: 40,
+        overrun: 80,
+      },
+      wood_boiler: {
+        fuel: "wood",
+        mj: 14.5,
+        eff: 78,
+        price: 600,
+        cannotExt: true,
+        ashPct: 1.5,
+        supply: 60,
+        idle: 45,
+        pumpMin: 45,
+        overrun: 85,
+      },
+      fireplace: {
+        fuel: "wood",
+        mj: 14.5,
+        eff: 75,
+        price: 600,
+        cannotExt: true,
+        ashPct: 1.5,
+        supply: 60,
+        idle: 45,
+        pumpMin: 40,
+        overrun: 85,
+      },
+      underfloor_manifold: {
+        fuel: "coal",
+        mj: 26.0,
+        eff: 95,
+        price: 1500,
+        cannotExt: false,
+        ashPct: 0.0,
+        supply: 35,
+        idle: 24,
+        pumpMin: 25,
+        overrun: 50,
+      },
+      gas_boiler: {
+        fuel: "gas",
+        mj: 26.0,
+        eff: 96,
+        price: 3.5,
+        cannotExt: false,
+        ashPct: 0.0,
+        supply: 50,
+        idle: 30,
+        pumpMin: 30,
+        overrun: 80,
+      },
+      electric_heater: {
+        fuel: "electricity",
+        mj: 26.0,
+        eff: 99,
+        price: 1.1,
+        cannotExt: false,
+        ashPct: 0.0,
+        supply: 50,
+        idle: 30,
+        pumpMin: 25,
+        overrun: 80,
+      },
+      air_heater: {
+        fuel: "electricity",
+        mj: 26.0,
+        eff: 95,
+        price: 1.1,
+        cannotExt: false,
+        ashPct: 0.0,
+        supply: 45,
+        idle: 25,
+        pumpMin: 20,
+        overrun: 80,
+      },
+      heat_pump: {
+        fuel: "electricity",
+        mj: 26.0,
+        eff: 100,
+        price: 1.1,
+        cannotExt: false,
+        ashPct: 0.0,
+        supply: 40,
+        idle: 25,
+        pumpMin: 20,
+        overrun: 65,
+      },
     };
     const d = fuelDefaults[plantType];
     this._updateDraft({
@@ -1475,8 +2232,13 @@ export class RsHeatPlants extends LitElement {
       calorific_value_mj_kg: d.mj,
       efficiency_pct: d.eff,
       fuel_price: d.price,
-      ch_pump_min_supply_temp:
-        plantType === "heat_pump" || plantType === "air_heater" ? 20 : 40,
+      cannot_extinguish: d.cannotExt,
+      off_mode: d.cannotExt ? "temperature" : "off",
+      ash_content_pct: d.ashPct,
+      target_supply_temp: d.supply,
+      idle_supply_temp: d.idle,
+      ch_pump_min_supply_temp: d.pumpMin,
+      ch_pump_overrun_temp: d.overrun,
     });
   }
 
@@ -1507,6 +2269,40 @@ export class RsHeatPlants extends LitElement {
     const next = this.heatPlants.filter((p) => p.id !== plantId);
     this._closeDialog();
     void this._savePlants(next);
+  }
+
+  private async _onLogFuel(plantId: string, kg: number, mode: "burned" | "refill") {
+    fireSaveStatus(this, "saving");
+    try {
+      await this.hass.callWS({
+        type: "roommind/heat_plants/log_fuel",
+        plant_id: plantId,
+        kg,
+        mode,
+      });
+      fireSaveStatus(this, "saved");
+      this.dispatchEvent(new CustomEvent("heat-plants-updated", { bubbles: true, composed: true }));
+    } catch {
+      fireSaveStatus(this, "error");
+    }
+  }
+
+  private async _onMaintenance(
+    plantId: string,
+    action: "refill" | "ash_cleaned" | "chimney_cleaned",
+  ) {
+    fireSaveStatus(this, "saving");
+    try {
+      await this.hass.callWS({
+        type: "roommind/heat_plants/maintenance",
+        plant_id: plantId,
+        action,
+      });
+      fireSaveStatus(this, "saved");
+      this.dispatchEvent(new CustomEvent("heat-plants-updated", { bubbles: true, composed: true }));
+    } catch {
+      fireSaveStatus(this, "error");
+    }
   }
 
   private async _onResetStats(plantId: string) {

@@ -439,3 +439,22 @@ def test_a_run_from_below_eco_keeps_eco_as_its_target_even_before_a_block():
     rows += [(17.5, "idle", 21.0)]
     over = compute_period_stats(_targeted(rows), "auto")["heat_overshoot"]
     assert over["max"] == pytest.approx(1.0)
+
+
+def test_humidification_and_dehumidification_period_stats():
+    """compute_period_stats tracks humidifying/dehumidifying hours, starts, and humidity comfort."""
+    points = [
+        _point(0, humidity=38.0, humidity_action="idle", humidify_target=45.0, dehumidify_target=55.0),
+        _point(1, humidity=42.0, humidity_action="humidifying", humidify_target=45.0, dehumidify_target=55.0),
+        _point(2, humidity=46.0, humidity_action="humidifying", humidify_target=45.0, dehumidify_target=55.0),
+        _point(3, humidity=50.0, humidity_action="idle", humidify_target=45.0, dehumidify_target=55.0),
+        _point(4, humidity=62.0, humidity_action="dehumidifying", humidify_target=45.0, dehumidify_target=55.0),
+    ]
+    stats = compute_period_stats(points, "auto")
+    assert stats["humidifying_hours"] == pytest.approx(2 * STEP / 3600, abs=0.01)
+    assert stats["dehumidifying_hours"] == pytest.approx(STEP / 3600, abs=0.01)
+    assert stats["humidifying_starts"] == 1
+    assert stats["dehumidifying_starts"] == 1
+    assert stats["humidity_comfort"] is not None
+    assert stats["humidity_comfort"]["within_pct"] > 0
+

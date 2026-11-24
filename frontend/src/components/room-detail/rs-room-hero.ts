@@ -275,6 +275,24 @@ export class RsRoomHero extends LitElement {
         color: var(--rs-err-text);
       }
 
+      .facts .humidify {
+        color: var(--rs-humidify-text);
+        font-weight: 500;
+      }
+
+      .facts .humidify ha-icon {
+        color: var(--rs-humidify);
+      }
+
+      .facts .dehumidify {
+        color: var(--rs-dehumidify-text);
+        font-weight: 500;
+      }
+
+      .facts .dehumidify ha-icon {
+        color: var(--rs-dehumidify);
+      }
+
       .chips {
         display: flex;
         flex-wrap: wrap;
@@ -524,13 +542,43 @@ export class RsRoomHero extends LitElement {
         live.humidity_mpc_active && live.humidifying_power
           ? ` · MPC ${formatPercent(live.humidifying_power, this.hass)}`
           : "";
+      const humCls =
+        live.humidity_action === "humidifying" || live.humidifier_active
+          ? "humidify"
+          : live.humidity_action === "dehumidifying" ||
+              live.dehumidifier_active ||
+              live.ac_dry_active
+            ? "dehumidify"
+            : "";
+      const humIcon =
+        humCls === "humidify"
+          ? "mdi:water-plus"
+          : humCls === "dehumidify"
+            ? "mdi:water-minus"
+            : "mdi:water-percent";
       facts.push(
-        html`<span
-          ><ha-icon icon="mdi:water-percent" aria-hidden="true"></ha-icon>${localize(
+        html`<span class=${humCls}
+          ><ha-icon .icon=${humIcon} aria-hidden="true"></ha-icon>${localize(
             "detail.hero.humidity",
             l,
             { value: `${formatPercent(live.current_humidity, this.hass)}${humTarget}${humMpc}` },
           )}</span
+        >`,
+      );
+    }
+    if (live.pm25 != null || live.pm10 != null || live.pm1 != null) {
+      const pmParts: string[] = [];
+      if (live.pm25 != null) pmParts.push(`PM2.5 ${Math.round(live.pm25)}`);
+      if (live.pm10 != null) pmParts.push(`PM10 ${Math.round(live.pm10)}`);
+      if (live.pm1 != null) pmParts.push(`PM1 ${Math.round(live.pm1)}`);
+      const pmBad =
+        live.air_quality_bad &&
+        (live.air_quality_reason === "pm25" ||
+          live.air_quality_reason === "pm10" ||
+          live.air_quality_reason === "pm1");
+      facts.push(
+        html`<span class=${pmBad ? "warn" : ""}
+          ><ha-icon icon="mdi:blur" aria-hidden="true"></ha-icon>${pmParts.join(" · ")} µg/m³</span
         >`,
       );
     }

@@ -450,12 +450,44 @@ export class RoomMindRoomCard extends LitElement {
             }
             ${
               live.current_humidity != null
-                ? html`<span class="humidity"
-                    >${localize("card.humidity", l, {
+                ? html`<span
+                    class="humidity ${
+                      live.humidity_action === "humidifying"
+                        ? "humidifying"
+                        : live.humidity_action === "dehumidifying"
+                          ? "dehumidifying"
+                          : ""
+                    }"
+                  >
+                    ${
+                      live.humidity_action === "humidifying"
+                        ? html`<ha-icon icon="mdi:water-plus" aria-hidden="true"></ha-icon>`
+                        : live.humidity_action === "dehumidifying"
+                          ? html`<ha-icon icon="mdi:water-minus" aria-hidden="true"></ha-icon>`
+                          : nothing
+                    }
+                    ${localize("card.humidity", l, {
                       value: formatPercent(live.current_humidity, { language: l }),
-                    })}</span
-                  >`
+                    })}${
+                      live.humidity_action === "humidifying" && live.humidify_target != null
+                        ? ` → ${Math.round(live.humidify_target)}%`
+                        : live.humidity_action === "dehumidifying" && live.dehumidify_target != null
+                          ? ` → ${Math.round(live.dehumidify_target)}%`
+                          : ""
+                    }
+                  </span>`
                 : nothing
+            }
+            ${
+              live.pm25 != null
+                ? html`<span class="pm ${live.air_quality_bad ? "pm-alert" : ""}"
+                    >PM2.5 ${Math.round(live.pm25)} µg/m³</span
+                  >`
+                : live.pm10 != null
+                  ? html`<span class="pm ${live.air_quality_bad ? "pm-alert" : ""}"
+                      >PM10 ${Math.round(live.pm10)} µg/m³</span
+                    >`
+                  : nothing
             }
           </span>
         </div>
@@ -1023,11 +1055,39 @@ export class RoomMindRoomCard extends LitElement {
       .icons {
         display: flex;
         align-items: center;
+        flex-wrap: wrap;
         gap: 6px;
       }
 
       .icons ha-icon {
         --mdc-icon-size: 16px;
+      }
+
+      .humidity {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+
+      .humidity.humidifying {
+        color: var(--rs-humidify-text);
+        font-weight: 500;
+      }
+
+      .humidity.dehumidifying {
+        color: var(--rs-dehumidify-text);
+        font-weight: 500;
+      }
+
+      .pm {
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .pm.pm-alert {
+        color: var(--rs-warn-text);
+        font-weight: 500;
       }
 
       .override-status {

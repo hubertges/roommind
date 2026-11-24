@@ -179,15 +179,26 @@ def _run_overshoot(points: list[dict], mode: str, target_key: str, sign: int) ->
 
 def compute_period_stats(points: list[dict], climate_mode: str) -> dict:
     """Sum up a time-sorted list of history points."""
-    seconds = {"total": 0.0, "heating": 0.0, "cooling": 0.0, "window": 0.0}
+    seconds = {
+        "total": 0.0,
+        "heating": 0.0,
+        "cooling": 0.0,
+        "window": 0.0,
+        "humidifying": 0.0,
+        "dehumidifying": 0.0,
+    }
     starts = {MODE_HEATING: 0, MODE_COOLING: 0}
     start_keys = {MODE_HEATING: "heat_starts", MODE_COOLING: "cool_starts"}
+    h_starts = {"humidifying": 0, "dehumidifying": 0}
+    h_start_keys = {"humidifying": "humidify_starts", "dehumidifying": "dehumidify_starts"}
     comfort = {"below": 0.0, "within": 0.0, "above": 0.0}
+    h_comfort = {"below": 0.0, "within": 0.0, "above": 0.0}
     by_price: dict[str, dict[str, float]] = {MODE_HEATING: {}, MODE_COOLING: {}}
     priced = shifted = 0.0
     deviation_sum = 0.0
     miss_sum = 0.0
     previous_mode = None
+    previous_h_action = None
     for (point, weight), deviation in zip(_weighted(points), _deviations(points, climate_mode), strict=True):
         mode = point.get("mode")
         seconds["total"] += weight
@@ -200,6 +211,28 @@ def compute_period_stats(points: list[dict], climate_mode: str) -> dict:
         elif mode in starts and previous_mode is not None and previous_mode != mode:
             starts[mode] += 1
         previous_mode = mode
+
+        h_action = point.get("humidity_action")
+        if h_action in h_starts:
+            seconds[h_action] += weight
+        if any(point.get(key) is not None for key in h_start_keys.values()):
+            for run, key in h_start_keys.items():
+                h_starts[run] += point.get(key) or 0
+        elif h_action in h_starts and previous_h_action is not None and previous_h_action != h_action:
+            h_starts[h_action] += 1
+        previous_h_action = h_action
+
+        hum = point.get("humidity")
+        h_low = point.get("humidify_target")
+        h_high = point.get("dehumidify_target")
+        if hum is not None and (h_low is not None or h_high is not None) and not point.get("window_open"):
+            if h_low is not None and hum < h_low - 3.0:
+                h_comfort["below"] += weight
+            elif h_high is not None and hum > h_high + 3.0:
+                h_comfort["above"] += weight
+            else:
+                h_comfort["within"] += weight
+
         if point.get("window_open"):
             seconds["window"] += weight
         level = point.get("price_level")
@@ -219,6 +252,7 @@ def compute_period_stats(points: list[dict], climate_mode: str) -> dict:
 
     judged = sum(comfort.values())
     missed = comfort["below"] + comfort["above"]
+    h_judged = sum(h_comfort.values())
     return {
         "hours": round(seconds["total"] / 3600, 2),
         "heating_hours": round(seconds[MODE_HEATING] / 3600, 2),
@@ -226,6 +260,19 @@ def compute_period_stats(points: list[dict], climate_mode: str) -> dict:
         "window_hours": round(seconds["window"] / 3600, 2),
         "heating_starts": starts[MODE_HEATING],
         "cooling_starts": starts[MODE_COOLING],
+        "humidifying_hours": round(seconds["humidifying"] / 3600, 2),
+        "dehumidifying_hours": round(seconds["dehumidifying"] / 3600, 2),
+        "humidifying_starts": h_starts["humidifying"],
+        "dehumidifying_starts": h_starts["dehumidifying"],
+        "humidity_comfort": (
+            {
+                "below_pct": round(100 * h_comfort["below"] / h_judged, 1),
+                "within_pct": round(100 * h_comfort["within"] / h_judged, 1),
+                "above_pct": round(100 * h_comfort["above"] / h_judged, 1),
+            }
+            if h_judged > 0
+            else None
+        ),
         # Run hours by price level and how long the price moved the target, None without a price
         "price": (
             {

@@ -32,6 +32,8 @@ from .const import (
     DEFAULT_ECO_HEAT,
     DEFAULT_OUTDOOR_COOLING_MIN,
     DEFAULT_OUTDOOR_HEATING_MAX,
+    DEFAULT_PM10_THRESHOLD,
+    DEFAULT_PM25_THRESHOLD,
     DOMAIN,
     HEATING_BOOST_TARGET,
     HEATING_SYSTEM_RADIATOR,
@@ -179,6 +181,9 @@ def _get_area_name(hass: HomeAssistant, area_id: str) -> str:
 ROOM_ENTITY_SUFFIXES = (
     "_climate",
     "_humidifier",
+    "_humidity_action",
+    "_humidity_target",
+    "_humidifying_power",
     "_target_temp",
     "_mode",
     "_override",
@@ -189,13 +194,20 @@ ROOM_ENTITY_SUFFIXES = (
 )
 # Suffixes only valid when the room has covers configured.
 COVER_ENTITY_SUFFIXES = ("_cover_auto", "_cover_paused")
-# Suffixes only valid when the room has a CO2 or VOC sensor (#267).
+# Suffixes only valid when the room has a CO2, VOC, or particulate matter sensor (#267).
 AIR_QUALITY_ENTITY_SUFFIXES = ("_air_quality",)
+HUMIDITY_SENSOR_SUFFIXES = ("_humidity_action", "_humidity_target", "_humidifying_power")
 
 
 def has_air_quality_sensor(room: dict) -> bool:
-    """Whether a room judges its air (CO2 or VOC sensor, not outdoor) and gets the air quality entity."""
-    return bool(room.get("co2_sensor") or room.get("voc_sensor")) and not room.get("is_outdoor", False)
+    """Whether a room judges its air (CO2, VOC, or PM sensor, not outdoor) and gets the air quality entity."""
+    return bool(
+        room.get("co2_sensor")
+        or room.get("voc_sensor")
+        or room.get("pm25_sensor")
+        or room.get("pm10_sensor")
+        or room.get("pm1_sensor")
+    ) and not room.get("is_outdoor", False)
 
 
 # Device states in which a compressor can be running (fan_only and off do not run it)
@@ -274,6 +286,9 @@ def _match_room_entity(parts: str, rooms: dict) -> tuple[str, str] | None:
 _NO_AIR_QUALITY: dict[str, Any] = {
     "co2": None,
     "voc": None,
+    "pm25": None,
+    "pm10": None,
+    "pm1": None,
     "air_quality_bad": False,
     "air_quality_reason": None,
     "ventilation_active": False,
@@ -438,6 +453,9 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self._air_quality_entity_areas: set[str] = set()
         self._climate_entity_areas: set[str] = set()
         self._humidifier_entity_areas: set[str] = set()
+        self._humidity_sensor_areas: set[str] = set()
+        self._heat_plant_sensor_ids: set[str] = set()
+        self._heat_plant_binary_sensor_ids: set[str] = set()
         # Air quality per room (CO2/VOC with hysteresis) and the ventilation RoomMind runs for it (#267)
         self._air_quality = AirQualityTracker()
         self._ventilation = VentilationController(hass)
@@ -578,7 +596,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
 
         # Control master devices based on aggregate room demand
         await self._async_control_master_devices(room_states, rooms, settings)
-        # Process heat plants (boilers, heaters, heat pumps, circulation pumps, fuel/cost metrics)
+        # Process heat plants (boilers, fireplaces, underfloor, heaters, heat pumps, pumps, fuel/cost/maintenance)
         try:
             elec_price = (
                 self._price_manager.signal.price_at(time.time())
@@ -588,6 +606,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             self.heat_plants_live = await self._heat_plant_manager.async_process(
                 rooms, room_states, settings, dynamic_elec_price=elec_price
             )
+            self._ensure_heat_plant_entities(settings.get("heat_plants", []))
             if self._heat_plant_manager.state_dirty and self._thermal_save_count == 0:
                 await store.async_save_settings(
                     {"heat_plant_state": self._heat_plant_manager.get_state()}
@@ -650,6 +669,12 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                             # Signed like the heat side; a cool-only room moves its cool side the other way
                             "price_shift": (rs.get("price_shift_heat") or -(rs.get("price_shift_cool") or 0.0)) or "",
                             "co2": rs.get("co2"),
+                            "pm25": rs.get("pm25"),
+                            "pm10": rs.get("pm10"),
+                            "humidity_action": rs.get("humidity_action", "idle"),
+                            "humidify_target": rs.get("humidify_target"),
+                            "dehumidify_target": rs.get("dehumidify_target"),
+                            "humidifying_power": rs.get("humidifying_power", 0),
                             **self._model_inputs.get(area_id, {}),
                         },
                     )
@@ -701,6 +726,17 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                     except Exception:  # noqa: BLE001
                         pass
 
+            # Record heat plant time-series history for analytics dashboard
+            for pid, plive in self.heat_plants_live.items():
+                try:
+                    await self.hass.async_add_executor_job(
+                        self._history_store.record_plant,
+                        pid,
+                        plive,
+                    )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.warning("Heat plant history record failed for '%s'", pid)
+
         # Save thermal data periodically
         self._thermal_save_count += 1
         if self._thermal_save_count >= THERMAL_SAVE_CYCLES:
@@ -723,6 +759,11 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                     await self.hass.async_add_executor_job(self._history_store.rotate, area_id)
                 except Exception:  # noqa: BLE001
                     _LOGGER.warning("History rotation failed for '%s'", area_id)
+            for pid in self.heat_plants_live:
+                try:
+                    await self.hass.async_add_executor_job(self._history_store.rotate_plant, pid)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.warning("Heat plant history rotation failed for '%s'", pid)
 
         # Valve protection: finish active cycles (runs every tick, cheap).
         # Pass a {eid: devices[]} map so idle_action is respected when the
@@ -769,6 +810,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             self._solar_sensors.learned = False
 
         self.rooms = room_states
+        if self.heat_plants_live:
+            return {"rooms": room_states, "heat_plants": self.heat_plants_live}
         return {"rooms": room_states}
 
     def _read_room_sensors(
@@ -3073,7 +3116,43 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             self.async_add_binary_sensor_entities([RoomMindAirQualitySensor(self, area_id)])
             self._air_quality_entity_areas.add(area_id)
 
+        from .sensor import _create_room_humidity_sensors, has_humidity_dashboard_sensors
+
+        if (
+            has_humidity_dashboard_sensors(room)
+            and area_id not in self._humidity_sensor_areas
+            and self.async_add_entities
+        ):
+            self.async_add_entities(_create_room_humidity_sensors(self, area_id))
+            self._humidity_sensor_areas.add(area_id)
+
         await self.async_request_refresh()
+
+    def _ensure_heat_plant_entities(self, heat_plants: list[dict]) -> None:
+        """Dynamically create HA dashboard sensor and binary sensor entities for newly added heat plants."""
+        if not isinstance(heat_plants, list) or not heat_plants:
+            return
+        from .binary_sensor import _create_heat_plant_binary_sensors
+        from .sensor import _create_heat_plant_sensors
+
+        new_sensors = []
+        new_binary_sensors = []
+        for plant_cfg in heat_plants:
+            if not isinstance(plant_cfg, dict) or not plant_cfg.get("id"):
+                continue
+            pid = str(plant_cfg["id"])
+            if pid not in self._heat_plant_sensor_ids and self.async_add_entities:
+                new_sensors.extend(_create_heat_plant_sensors(self, plant_cfg))
+                self._heat_plant_sensor_ids.add(pid)
+            if pid not in self._heat_plant_binary_sensor_ids and self.async_add_binary_sensor_entities:
+                b_ents = _create_heat_plant_binary_sensors(self, plant_cfg)
+                if b_ents:
+                    new_binary_sensors.extend(b_ents)
+                    self._heat_plant_binary_sensor_ids.add(pid)
+        if new_sensors and self.async_add_entities:
+            self.async_add_entities(new_sensors)
+        if new_binary_sensors and self.async_add_binary_sensor_entities:
+            self.async_add_binary_sensor_entities(new_binary_sensors)
 
     async def async_turn_room_off(self, area_id: str) -> None:
         """Stop controlling the room and have the next cycle switch its devices off (room climate entity off).
@@ -3146,6 +3225,19 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         for kind, threshold in (
             ("co2", room.get("co2_threshold") or DEFAULT_CO2_THRESHOLD),
             ("voc", room.get("voc_threshold")),
+            (
+                "pm25",
+                room.get("pm25_threshold")
+                if "pm25_threshold" in room
+                else DEFAULT_PM25_THRESHOLD,
+            ),
+            (
+                "pm10",
+                room.get("pm10_threshold")
+                if "pm10_threshold" in room
+                else DEFAULT_PM10_THRESHOLD,
+            ),
+            ("pm1", room.get("pm1_threshold")),
         ):
             sensor = room.get(f"{kind}_sensor")
             if not sensor:
@@ -3899,6 +3991,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self._room_fan.remove_room(area_id)
         self._climate_entity_areas.discard(area_id)
         self._humidifier_entity_areas.discard(area_id)
+        self._humidity_sensor_areas.discard(area_id)
         self._heat_source_states.pop(area_id, None)
         self._coil_dry_manager.remove_room(area_id)
         self._room_solar.pop(area_id, None)
@@ -3911,8 +4004,16 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         """
         from homeassistant.helpers import entity_registry as er
 
+        from .sensor import has_humidity_dashboard_sensors
+
         store = self.hass.data[DOMAIN]["store"]
         rooms = rooms_with_area(self.hass, store.get_rooms())
+        settings = store.get_settings() if hasattr(store, "get_settings") else {}
+        plant_ids = {
+            str(p["id"])
+            for p in (settings.get("heat_plants", []) if isinstance(settings, dict) else [])
+            if isinstance(p, dict) and p.get("id")
+        }
         registry = er.async_get(self.hass)
 
         # Global entities (not per-room) that should never be cleaned up
@@ -3933,8 +4034,15 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             if uid in global_uids:
                 continue
 
-            # Match uid to an owning room via exact suffix matching (#340).
+            # Match uid to an owning room or heat plant via exact suffix matching (#340).
             parts = uid.removeprefix(f"{DOMAIN}_")
+            if parts.startswith("plant_"):
+                rest = parts.removeprefix("plant_")
+                if any(rest.startswith(f"{pid}_") for pid in plant_ids):
+                    continue
+                to_remove.append(entity_entry.entity_id)
+                continue
+
             match = _match_room_entity(parts, rooms)
 
             if match is None:
@@ -3947,6 +4055,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 # Cover entity for a room without covers configured — orphaned.
                 to_remove.append(entity_entry.entity_id)
             elif suffix in AIR_QUALITY_ENTITY_SUFFIXES and not has_air_quality_sensor(rooms[area_id]):
+                to_remove.append(entity_entry.entity_id)
+            elif suffix in HUMIDITY_SENSOR_SUFFIXES and not has_humidity_dashboard_sensors(rooms[area_id]):
                 to_remove.append(entity_entry.entity_id)
 
         for eid in to_remove:

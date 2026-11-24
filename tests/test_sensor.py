@@ -208,3 +208,83 @@ def test_tauron_forecast_weekday_zones():
     prices = {entry["price"] for entry in data["raw_today"]}
     assert len(prices) == 2
     assert min(prices) < max(prices)
+
+
+def test_room_humidity_dashboard_sensors():
+    """Rooms with humidifier control expose enabled-by-default humidity action, target, and power sensors."""
+    from custom_components.roommind.sensor import (
+        RoomMindHumidifyingPowerSensor,
+        RoomMindHumidityActionSensor,
+        RoomMindHumidityTargetSensor,
+        _create_room_humidity_sensors,
+        has_humidity_dashboard_sensors,
+    )
+
+    assert has_humidity_dashboard_sensors({"thermostats": ["climate.trv1"]}) is False
+    assert has_humidity_dashboard_sensors({"humidifier_entity": "humidifier.living"}) is True
+    assert has_humidity_dashboard_sensors({"humidity_min": 45}) is True
+
+    coordinator = _make_coordinator(
+        {
+            "living": {
+                "humidity_action": "humidifying",
+                "target_humidity": 50.0,
+                "humidifying_power": 65,
+                "humidifier_active": True,
+                "humidity_mpc_active": True,
+            }
+        }
+    )
+    sensors = _create_room_humidity_sensors(coordinator, "living")
+    assert len(sensors) == 3
+    assert isinstance(sensors[0], RoomMindHumidityActionSensor)
+    assert isinstance(sensors[1], RoomMindHumidityTargetSensor)
+    assert isinstance(sensors[2], RoomMindHumidifyingPowerSensor)
+    assert all(s.entity_registry_enabled_default is True for s in sensors)
+    assert sensors[0].native_value == "humidifying"
+    assert sensors[1].native_value == 50.0
+    assert sensors[2].native_value == 65
+
+
+def test_heat_plant_dashboard_sensors():
+    """Heat plants expose enabled-by-default sensors for temps, power, kg fuel, cost, hopper, ash, and chimney."""
+    from custom_components.roommind.sensor import _create_heat_plant_sensors
+
+    coordinator = MagicMock()
+    coordinator.data = {
+        "rooms": {},
+        "heat_plants": {
+            "coal_1": {
+                "state": "hold",
+                "supply_temp": 48.5,
+                "return_temp": 39.0,
+                "dhw_temp": 52.0,
+                "flue_temp": 120.0,
+                "delta_t": 9.5,
+                "current_thermal_kw": 2.4,
+                "burn_rate_per_h": 0.45,
+                "fuel_consumed_today": 14.2,
+                "fuel_consumed_total": 340.5,
+                "cost_today": 21.3,
+                "cost_total": 510.75,
+                "fuel_remaining_kg": 42.0,
+                "ash_fill_pct": 31.0,
+                "chimney_wear_pct": 45.0,
+                "fuel_unit": "kg",
+            }
+        },
+    }
+    plant = {"id": "coal_1", "name": "Piec Ekogroszek", "currency": "PLN", "fuel_type": "coal"}
+    sensors = _create_heat_plant_sensors(coordinator, plant)
+    by_suffix = {s._spec.suffix: s for s in sensors}
+    assert by_suffix["state"].native_value == "hold"
+    assert by_suffix["supply_temp"].native_value == 48.5
+    assert by_suffix["fuel_today"].native_value == 14.2
+    assert by_suffix["fuel_today"].native_unit_of_measurement == "kg"
+    assert by_suffix["cost_today"].native_value == 21.3
+    assert by_suffix["cost_today"].native_unit_of_measurement == "PLN"
+    assert by_suffix["fuel_remaining"].native_value == 42.0
+    assert by_suffix["ash_level"].native_value == 31.0
+    assert by_suffix["chimney_wear"].native_value == 45.0
+    assert all(s.entity_registry_enabled_default is True for s in sensors)
+

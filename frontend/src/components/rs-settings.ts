@@ -175,6 +175,8 @@ const SETTINGS: [keyof GlobalSettings, SettingSync][] = [
       write: (v) => (v.moldPreventionNotify ? filledTargets(v) : []),
     },
   ],
+  ["heat_plant_notifications_enabled", plain("heatPlantNotificationsEnabled", true)],
+  ["heat_plant_notification_cooldown", plain("heatPlantNotificationCooldown", 180)],
 ];
 
 const SETTING_FIELDS = [...new Set(SETTINGS.flatMap(([, sync]) => sync.fields))];
@@ -229,6 +231,8 @@ export class RsSettings extends LitElement {
   @state() private _moldPreventionEnabled = false;
   @state() private _moldPreventionIntensity: "light" | "medium" | "strong" = "medium";
   @state() private _moldPreventionNotify = false;
+  @state() private _heatPlantNotificationsEnabled = true;
+  @state() private _heatPlantNotificationCooldown = 180;
   @state() private _compressorGroups: CompressorGroup[] = [];
   @state() private _coilDryEnabled = false;
   @state() private _coilDryMinutes = 20;
@@ -566,6 +570,8 @@ export class RsSettings extends LitElement {
           .moldDetectionEnabled=${this._moldDetectionEnabled}
           .moldPreventionEnabled=${this._moldPreventionEnabled}
           .moldPreventionNotify=${this._moldPreventionNotify}
+          .heatPlantNotificationsEnabled=${this._heatPlantNotificationsEnabled}
+          .heatPlantNotificationCooldown=${this._heatPlantNotificationCooldown}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-notifications>`;
       case "learning":

@@ -11,6 +11,12 @@ export const DEFAULT_CO2_THRESHOLD = 1000;
 export const MIN_CO2_THRESHOLD = 800;
 export const MAX_CO2_THRESHOLD = 5000;
 
+/** Particulate matter thresholds in µg/m³; mirror DEFAULT/MIN/MAX_PM*_THRESHOLD. */
+export const DEFAULT_PM25_THRESHOLD = 25;
+export const DEFAULT_PM10_THRESHOLD = 50;
+export const MIN_PM_THRESHOLD = 1;
+export const MAX_PM_THRESHOLD = 1000;
+
 /** Humidity limits in % RH; mirror DEFAULT/MIN/MAX_HUMIDITY_* and HUMIDITY_LIMIT_GAP (#518, #526). */
 export const DEFAULT_HUMIDITY_MAX = 60;
 export const DEFAULT_HUMIDITY_MIN = 40;

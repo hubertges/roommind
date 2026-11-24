@@ -25,14 +25,15 @@ const PANEL_BOTTOM = 24;
  * shows while its series has data and is not hidden in the legend. A new panel = an entry
  * here plus its series tagged with `panel` in buildChartSeries.
  */
-export type SubPanel = "outdoor" | "humidity" | "co2" | "price";
+export type SubPanel = "outdoor" | "humidity" | "co2" | "pm" | "price";
 export const SUB_PANELS: Record<SubPanel, { height: number; series: string }> = {
   outdoor: { height: 68, series: "outdoor_temp" },
   humidity: { height: 84, series: "humidity" },
   co2: { height: 68, series: "co2" },
+  pm: { height: 68, series: "pm25" },
   price: { height: 68, series: "price" },
 };
-export const SUB_PANEL_ORDER: readonly SubPanel[] = ["outdoor", "humidity", "co2", "price"];
+export const SUB_PANEL_ORDER: readonly SubPanel[] = ["outdoor", "humidity", "co2", "pm", "price"];
 // Neutral: the line and area take the level colours (priceVisualMap), gold is the price target
 const PRICE_COLOR = "rgb(128, 128, 128)";
 /** Mirrors COMFORT_TOLERANCE_K (analytics_stats): the summary counts this far outside as on target. */
@@ -145,6 +146,7 @@ const PANEL_TITLE_KEYS: Record<SubPanel | "main", TranslationKey> = {
   outdoor: "analytics.panel_outdoor",
   humidity: "analytics.humidity",
   co2: "analytics.co2",
+  pm: "analytics.pm",
   price: "analytics.price",
 };
 
@@ -160,9 +162,11 @@ export function panelTitle(
       ? "%"
       : panel === "co2"
         ? "ppm"
-        : panel === "price"
-          ? units.price
-          : units.temp;
+        : panel === "pm"
+          ? "µg/m³"
+          : panel === "price"
+            ? units.price
+            : units.temp;
   return unit ? `${title} (${unit})` : title;
 }
 
@@ -219,6 +223,11 @@ export function visiblePanels(
   hidden: ReadonlySet<string>,
 ): SubPanel[] {
   return SUB_PANEL_ORDER.filter((p) => {
+    if (p === "pm") {
+      const hasPm25 = !hidden.has("pm25") && series.some((s) => s.id === "pm25");
+      const hasPm10 = !hidden.has("pm10") && series.some((s) => s.id === "pm10");
+      return hasPm25 || hasPm10;
+    }
     const id = SUB_PANELS[p].series;
     return !hidden.has(id) && series.some((s) => s.id === id);
   });
@@ -307,7 +316,11 @@ export function buildChartSeries(
   const outdoorData: Array<[number, number]> = [];
   const deviceTargetData: Array<[number, number]> = [];
   const humidityData: Array<[number, number]> = [];
+  const humidifyTargetData: Array<[number, number]> = [];
+  const dehumidifyTargetData: Array<[number, number]> = [];
   const co2Data: Array<[number, number]> = [];
+  const pm25Data: Array<[number, number]> = [];
+  const pm10Data: Array<[number, number]> = [];
   const bandBaseData: Array<[number, number | null]> = [];
   const bandData: Array<[number, number | null]> = [];
   // Outside the judged sides: too cold below the heat side, too warm above the cool side
@@ -344,7 +357,12 @@ export function buildChartSeries(
     if (p.outdoor_temp !== null) outdoorData.push([ts, d(p.outdoor_temp)]);
     if (!isOutdoor && p.device_setpoint != null) deviceTargetData.push([ts, d(p.device_setpoint)]);
     if (p.humidity != null) humidityData.push([ts, p.humidity]);
+    if (!isOutdoor && p.humidify_target != null) humidifyTargetData.push([ts, p.humidify_target]);
+    if (!isOutdoor && p.dehumidify_target != null)
+      dehumidifyTargetData.push([ts, p.dehumidify_target]);
     if (p.co2 != null) co2Data.push([ts, p.co2]);
+    if (p.pm25 != null) pm25Data.push([ts, p.pm25]);
+    if (p.pm10 != null) pm10Data.push([ts, p.pm10]);
     if (targetBand && !isOutdoor) pushBand(p);
   }
 
@@ -482,6 +500,34 @@ export function buildChartSeries(
       smooth: true,
       lineStyle: { width: 1.5 },
       panel: "co2",
+    });
+  }
+
+  if (pm25Data.length > 0) {
+    series.push({
+      id: "pm25",
+      type: "line",
+      name: localize("analytics.pm25", l),
+      color: "#e65100",
+      data: pm25Data,
+      showSymbol: false,
+      smooth: true,
+      lineStyle: { width: 1.8 },
+      panel: "pm",
+    });
+  }
+
+  if (pm10Data.length > 0) {
+    series.push({
+      id: "pm10",
+      type: "line",
+      name: localize("analytics.pm10", l),
+      color: "#7e57c2",
+      data: pm10Data,
+      showSymbol: false,
+      smooth: true,
+      lineStyle: { width: 1.5, type: "dashed" },
+      panel: "pm",
     });
   }
 
@@ -631,6 +677,32 @@ export function buildChartSeries(
       connectNulls: false,
       z: -1,
     });
+    if (humidifyTargetData.length > 0) {
+      series.push({
+        id: "humidify_target",
+        type: "line",
+        name: localize("analytics.humidify_target", l),
+        color: "#00acc1",
+        data: humidifyTargetData,
+        showSymbol: false,
+        step: "end",
+        lineStyle: { width: 1.5, type: "dashed" },
+        panel: "humidity",
+      });
+    }
+    if (dehumidifyTargetData.length > 0) {
+      series.push({
+        id: "dehumidify_target",
+        type: "line",
+        name: localize("analytics.dehumidify_target", l),
+        color: "#9c27b0",
+        data: dehumidifyTargetData,
+        showSymbol: false,
+        step: "end",
+        lineStyle: { width: 1.5, type: "dashed" },
+        panel: "humidity",
+      });
+    }
   }
 
   const priceData = points.flatMap((p): Array<[number, number]> =>
@@ -802,8 +874,11 @@ export function buildChartOptions(
         let markup = `<div style="font-weight:500;margin-bottom:4px">${time}</div>`;
         // Rows per panel, each panel under its own heading, so a value reads with its plot
         const groups = new Map<SubPanel | "main", string[]>();
-        const panelOf = (sid: string): SubPanel | "main" =>
-          SUB_PANEL_ORDER.find((p) => SUB_PANELS[p].series === sid) ?? "main";
+        const panelOf = (sid: string): SubPanel | "main" => {
+          if (sid === "pm25" || sid === "pm10") return "pm";
+          if (sid === "humidify_target" || sid === "dehumidify_target") return "humidity";
+          return SUB_PANEL_ORDER.find((p) => SUB_PANELS[p].series === sid) ?? "main";
+        };
         let roomVal: number | null = null;
         let predVal: number | null = null;
         const hoverTs = params[0].value[0] / 1000;
@@ -836,7 +911,11 @@ export function buildChartOptions(
             value = `${Math.round(v)}\u00A0%`;
             if (level !== "good") value += ` (${localize(`analytics.humidity_${level}`, l)})`;
           }
-          if (sid === "co2") value = `${formatNumber(v, hass, 0)} ppm`;
+          if (sid === "humidify_target" || sid === "dehumidify_target") {
+            value = `${Math.round(v)}\u00A0%`;
+          }
+          if (sid === "co2") value = `${formatNumber(v, hass, 0)}\u00A0ppm`;
+          if (sid === "pm25" || sid === "pm10") value = `${formatNumber(v, hass, 1)}\u00A0µg/m³`;
           if (sid === "price") {
             value = new Intl.NumberFormat(l, { maximumSignificantDigits: 4 }).format(v);
             if (ctx.priceUnit) value += `\u00A0${ctx.priceUnit}`;
@@ -881,6 +960,18 @@ export function buildChartOptions(
             }
           } else if (closest.mode === "cooling") {
             parts.push(localize("analytics.cooling_period", l));
+          }
+          if (closest.humidity_action === "humidifying") {
+            const hp = closest.humidifying_power;
+            if (hp != null && hp > 0 && hp < 100) {
+              parts.push(
+                `${localize("analytics.humidifying_period", l)} ${formatPercent(hp, hass)}`,
+              );
+            } else {
+              parts.push(localize("analytics.humidifying_period", l));
+            }
+          } else if (closest.humidity_action === "dehumidifying") {
+            parts.push(localize("analytics.dehumidifying_period", l));
           }
           if (closest.window_open) parts.push(localize("analytics.window_open_period", l));
           if (parts.length > 0) {
@@ -951,6 +1042,29 @@ function co2Axis(
   };
 }
 
+/** Particulate matter (PM2.5 / PM10) in µg/m³ from 0 up to the nearest 25 µg/m³ step. */
+function pmAxis(
+  points: AnalyticsDataPoint[],
+  gridIndex: number,
+  hass: HomeAssistant,
+): Record<string, unknown> {
+  const high = points.reduce((m, p) => {
+    let next = m;
+    if (p.pm25 != null) next = Math.max(next, p.pm25);
+    if (p.pm10 != null) next = Math.max(next, p.pm10);
+    return next;
+  }, 25);
+  const max = Math.max(25, Math.ceil(high / 25) * 25);
+  return {
+    type: "value",
+    gridIndex,
+    min: 0,
+    max,
+    interval: max / 2,
+    axisLabel: unitLabel("", hass, { maximumFractionDigits: 0 }),
+  };
+}
+
 function panelAxis(
   panel: SubPanel,
   points: AnalyticsDataPoint[],
@@ -962,6 +1076,7 @@ function panelAxis(
     return { ...humidityAxis(points, gridIndex), axisLabel: unitLabel("%", hass) };
   if (panel === "outdoor") return outdoorAxis(points, gridIndex, hass);
   if (panel === "co2") return co2Axis(points, gridIndex, hass);
+  if (panel === "pm") return pmAxis(points, gridIndex, hass);
   // Price: whatever unit the source uses; bounds from the prices, the level bands reach far above
   const prices = points.map((p) => p.price).filter((v): v is number => v != null);
   const low = prices.length > 0 ? prices.reduce((a, b) => Math.min(a, b)) : 0;

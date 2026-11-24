@@ -515,9 +515,12 @@ export class RoomMindPanel extends LitElement {
         return html`<rs-analytics
           .hass=${this.hass}
           .rooms=${this._rooms}
+          .heatPlants=${this._heatPlants}
+          .heatPlantsLive=${this._heatPlantsLive}
           .initialRoom=${this._analyticsRoom}
           .controlMode=${this._controlMode}
           @room-selected=${this._onAnalyticsRoomSelected}
+          @heat-plants-updated=${this._onRoomUpdated}
         ></rs-analytics>`;
       case "schedules":
         return this._roomsLoaded
@@ -625,9 +628,12 @@ export class RoomMindPanel extends LitElement {
       .controlMode=${common.controlMode}
       .climateControlActive=${common.climateControlActive}
       .summary=${summary}
+      .heatPlants=${this._heatPlants}
+      .heatPlantsLive=${this._heatPlantsLive}
       @area-selected=${this._onAreaSelected}
       @room-updated=${this._onRoomUpdated}
       @edit-requested=${this._startEditing}
+      @open-heat-plants=${() => this._onTabClicked("heat_plants")}
     ></rs-dashboard>`;
   }
 

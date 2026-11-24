@@ -36,6 +36,7 @@ export class RsAnalyticsSummary extends LitElement {
   @property({ type: Boolean }) public canHeat = true;
   @property({ type: Boolean }) public canCool = false;
   @property({ type: Boolean }) public hasWindowSensor = false;
+  @property({ type: Boolean }) public hasHumidityControl = false;
   /** The room follows the price (price shift or price-aware heat source): show the price tiles. */
   @property({ type: Boolean }) public showPrice = false;
   @property({ type: String }) public language = "en";
@@ -44,6 +45,10 @@ export class RsAnalyticsSummary extends LitElement {
     const s = this.stats;
     if (!s || s.hours <= 0) return nothing;
     const l = this.language;
+    const humHours = s.humidifying_hours ?? 0;
+    const dehumHours = s.dehumidifying_hours ?? 0;
+    const showHumidify = this.hasHumidityControl || humHours > 0 || s.humidity_comfort != null;
+    const showDehumidify = dehumHours > 0;
     return html`
       <rs-list-card
         .heading=${localize("analytics.summary", l)}
@@ -61,6 +66,21 @@ export class RsAnalyticsSummary extends LitElement {
               ${
                 this.canCool || s.cooling_hours > 0
                   ? this._runTile("cool", s.cooling_hours, s.cooling_starts, s.cool_overshoot)
+                  : nothing
+              }
+              ${
+                showHumidify
+                  ? this._humidityTile(
+                      "humidify",
+                      humHours,
+                      s.humidifying_starts ?? 0,
+                      s.humidity_comfort?.within_pct ?? null,
+                    )
+                  : nothing
+              }
+              ${
+                showDehumidify
+                  ? this._humidityTile("dehumidify", dehumHours, s.dehumidifying_starts ?? 0, null)
                   : nothing
               }
               ${this.hasWindowSensor || s.window_hours > 0 ? this._windowTile(s) : nothing}
@@ -197,6 +217,46 @@ export class RsAnalyticsSummary extends LitElement {
       ${this._strip(
         timeSpans(this.points, (p) => p.mode === mode),
         kind === "heat" ? "var(--rs-heat)" : "var(--rs-cool)",
+      )}
+    </rs-stat-tile>`;
+  }
+
+  private _humidityTile(
+    kind: "humidify" | "dehumidify",
+    hours: number,
+    starts: number,
+    withinPct: number | null,
+  ) {
+    const l = this.language;
+    const parts =
+      starts > 0 || hours <= 0
+        ? [
+            localize(starts === 1 ? "analytics.run" : "analytics.runs", l, {
+              count: formatNumber(starts, this.hass),
+            }),
+          ]
+        : [];
+    if (withinPct != null) {
+      parts.push(
+        localize("analytics.humidity_on_target", l, {
+          pct: formatPercent(Math.round(withinPct), this.hass),
+        }),
+      );
+    }
+    const action = kind === "humidify" ? "humidifying" : "dehumidifying";
+    return html`<rs-stat-tile
+      .icon=${kind === "humidify" ? "mdi:water-plus" : "mdi:water-minus"}
+      tone=${kind}
+      .label=${localize(
+        kind === "humidify" ? "analytics.humidifying_period" : "analytics.dehumidifying_period",
+        l,
+      )}
+      .value=${formatHours(hours, this.language)}
+      .sub=${parts.join(" · ")}
+    >
+      ${this._strip(
+        timeSpans(this.points, (p) => p.humidity_action === action),
+        kind === "humidify" ? "var(--rs-humidify)" : "var(--rs-dehumidify)",
       )}
     </rs-stat-tile>`;
   }

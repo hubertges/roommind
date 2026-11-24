@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
+import voluptuous as vol
 from homeassistant.components.frontend import (
     add_extra_js_url,
     async_register_built_in_panel,
@@ -14,7 +15,7 @@ from homeassistant.components.frontend import (
 )
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import Event, HomeAssistant, ServiceCall
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import issue_registry as ir
@@ -35,11 +36,103 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 CARD_URL = "/roommind/roommind-card.js"
 
+SERVICE_LOG_FUEL = "log_heat_plant_fuel"
+SERVICE_CONFIRM_MAINTENANCE = "confirm_heat_plant_maintenance"
+
+_LOG_FUEL_SCHEMA = vol.Schema(
+    {
+        vol.Optional("plant_id"): cv.string,
+        vol.Required("kg"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=5000.0)),
+        vol.Optional("mode", default="refill"): vol.In(["burned", "refill"]),
+    }
+)
+
+_CONFIRM_MAINTENANCE_SCHEMA = vol.Schema(
+    {
+        vol.Optional("plant_id"): cv.string,
+        vol.Required("action"): vol.In(["refill", "ash_cleaned", "chimney_cleaned"]),
+        vol.Optional("kg"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=5000.0)),
+    }
+)
+
+
+def _resolve_plant_id(hass: HomeAssistant, requested_id: str | None) -> str | None:
+    """Resolve an explicit plant_id or fall back to the first configured solid-fuel/heat plant."""
+    if requested_id:
+        return requested_id
+    store = hass.data.get(DOMAIN, {}).get("store")
+    settings = store.get_settings() if store and hasattr(store, "get_settings") else {}
+    plants = settings.get("heat_plants", []) if isinstance(settings, dict) else []
+    for p in plants:
+        if isinstance(p, dict) and p.get("id") and p.get("fuel_type", "coal") in ("coal", "pellet", "wood"):
+            return str(p["id"])
+    for p in plants:
+        if isinstance(p, dict) and p.get("id"):
+            return str(p["id"])
+    return None
+
+
+def _async_register_services(hass: HomeAssistant) -> None:
+    """Register RoomMind Home Assistant services for heat plant fuel & maintenance automations."""
+
+    async def _handle_log_fuel(call: ServiceCall) -> None:
+        coordinator: RoomMindCoordinator | None = hass.data.get(DOMAIN, {}).get("coordinator")
+        store = hass.data.get(DOMAIN, {}).get("store")
+        if not coordinator or not store:
+            _LOGGER.warning("RoomMind service %s: integration not ready", SERVICE_LOG_FUEL)
+            return
+        plant_id = _resolve_plant_id(hass, call.data.get("plant_id"))
+        if not plant_id:
+            _LOGGER.warning("RoomMind service %s: no heat plant configured", SERVICE_LOG_FUEL)
+            return
+        coordinator._heat_plant_manager.load_configs(store.get_settings().get("heat_plants", []))
+        ok = coordinator._heat_plant_manager.log_fuel(
+            plant_id, float(call.data["kg"]), mode=str(call.data.get("mode", "refill"))
+        )
+        if not ok:
+            _LOGGER.warning("RoomMind service %s: heat plant '%s' not found", SERVICE_LOG_FUEL, plant_id)
+            return
+        await store.async_save_settings({"heat_plant_state": coordinator._heat_plant_manager.get_state()})
+        await coordinator.async_request_refresh()
+
+    async def _handle_confirm_maintenance(call: ServiceCall) -> None:
+        coordinator: RoomMindCoordinator | None = hass.data.get(DOMAIN, {}).get("coordinator")
+        store = hass.data.get(DOMAIN, {}).get("store")
+        if not coordinator or not store:
+            _LOGGER.warning("RoomMind service %s: integration not ready", SERVICE_CONFIRM_MAINTENANCE)
+            return
+        plant_id = _resolve_plant_id(hass, call.data.get("plant_id"))
+        if not plant_id:
+            _LOGGER.warning("RoomMind service %s: no heat plant configured", SERVICE_CONFIRM_MAINTENANCE)
+            return
+        coordinator._heat_plant_manager.load_configs(store.get_settings().get("heat_plants", []))
+        ok = coordinator._heat_plant_manager.confirm_maintenance(
+            plant_id, str(call.data["action"]), kg=call.data.get("kg")
+        )
+        if not ok:
+            _LOGGER.warning(
+                "RoomMind service %s: heat plant '%s' not found", SERVICE_CONFIRM_MAINTENANCE, plant_id
+            )
+            return
+        await store.async_save_settings({"heat_plant_state": coordinator._heat_plant_manager.get_state()})
+        await coordinator.async_request_refresh()
+
+    if not hass.services.has_service(DOMAIN, SERVICE_LOG_FUEL):
+        hass.services.async_register(DOMAIN, SERVICE_LOG_FUEL, _handle_log_fuel, schema=_LOG_FUEL_SCHEMA)
+    if not hass.services.has_service(DOMAIN, SERVICE_CONFIRM_MAINTENANCE):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_CONFIRM_MAINTENANCE,
+            _handle_confirm_maintenance,
+            schema=_CONFIRM_MAINTENANCE_SCHEMA,
+        )
+
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the RoomMind integration (YAML, runs once)."""
     hass.data.setdefault(DOMAIN, {})
     async_register_websocket_commands(hass)
+    _async_register_services(hass)
     return True
 
 

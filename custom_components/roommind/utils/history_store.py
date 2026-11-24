@@ -7,7 +7,7 @@ import logging
 import os
 import time
 
-from ..const import MODE_COOLING, MODE_HEATING
+from ..const import MODE_COOLING, MODE_DEHUMIDIFYING, MODE_HEATING, MODE_HUMIDIFYING
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,13 +42,40 @@ DETAIL_FIELDS = [
     # Extremes of a history bucket: a short run peaks inside it, the bucket mean hides the peak
     "room_temp_max",
     "room_temp_min",
-    # Room air CO2 in ppm (#267)
+    # Room air CO2 in ppm (#267) and particulate matter (µg/m³)
     "co2",
+    "pm25",
+    "pm10",
+    # Humidity control telemetry
+    "humidity_action",
+    "humidify_target",
+    "dehumidify_target",
+    "humidifying_power",
+    "humidify_starts",
+    "dehumidify_starts",
     # What the model learned from (analytics backtest): signed delivered power share
     # (+ heating, - cooling), sun behind the covers, residual heat share, occupancy
     *MODEL_INPUT_FIELDS,
 ]
 START_FIELDS = {MODE_HEATING: "heat_starts", MODE_COOLING: "cool_starts"}
+HUMIDITY_START_FIELDS = {MODE_HUMIDIFYING: "humidify_starts", MODE_DEHUMIDIFYING: "dehumidify_starts"}
+
+PLANT_DETAIL_FIELDS = [
+    "timestamp",
+    "state",
+    "supply_temp",
+    "return_temp",
+    "dhw_temp",
+    "flue_temp",
+    "delta_t",
+    "thermal_kw",
+    "burn_rate_per_h",
+    "fuel_consumed_today",
+    "fuel_remaining_kg",
+    "cost_today",
+    "ch_pump_active",
+    "dhw_pump_active",
+]
 DETAIL_MAX_AGE = 48 * 3600  # 48 hours
 HISTORY_MAX_AGE = 90 * 24 * 3600  # 90 days
 
@@ -59,6 +86,7 @@ class HistoryStore:
     def __init__(self, base_dir: str) -> None:
         self._base_dir = base_dir
         self._last_mode: dict[str, str] = {}
+        self._last_humidity_action: dict[str, str] = {}
 
     def _ensure_dir(self) -> None:
         os.makedirs(self._base_dir, exist_ok=True)
@@ -79,22 +107,28 @@ class HistoryStore:
     def _history_path(self, area_id: str) -> str:
         return self._room_path(area_id, "history")
 
+    def _plant_path(self, plant_id: str, kind: str) -> str:
+        if not self._is_safe_id(plant_id):
+            raise ValueError(f"Unsafe plant id for history files: {plant_id!r}")
+        return os.path.join(self._base_dir, f"_plant_{plant_id}_{kind}.csv")
+
     @staticmethod
-    def _migrate_header(path: str) -> None:
-        """Rewrite CSV with current DETAIL_FIELDS header if columns changed."""
+    def _migrate_header(path: str, fields: list[str] | None = None) -> None:
+        """Rewrite CSV with current header if columns changed."""
+        target_fields = fields or DETAIL_FIELDS
         if not os.path.isfile(path):
             return
         try:
             with open(path, newline="") as f:
                 reader = csv.DictReader(f)
-                if reader.fieldnames == DETAIL_FIELDS:
+                if reader.fieldnames == target_fields:
                     return
                 rows = list(reader)
             with open(path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=DETAIL_FIELDS, extrasaction="ignore")
+                writer = csv.DictWriter(f, fieldnames=target_fields, extrasaction="ignore")
                 writer.writeheader()
                 for row in rows:
-                    writer.writerow({k: row.get(k, "") for k in DETAIL_FIELDS})
+                    writer.writerow({k: row.get(k, "") for k in target_fields})
         except Exception:  # noqa: BLE001
             pass
 
@@ -108,8 +142,14 @@ class HistoryStore:
         if area_id not in self._last_mode:
             last = self.read_detail(area_id)[-1:]
             self._last_mode[area_id] = last[0].get("mode", "") if last else mode
+            self._last_humidity_action[area_id] = (
+                last[0].get("humidity_action", "") if last else data.get("humidity_action", "")
+            )
         previous = self._last_mode[area_id]
         self._last_mode[area_id] = mode
+        h_action = data.get("humidity_action", "") or ""
+        prev_h_action = self._last_humidity_action.get(area_id, h_action)
+        self._last_humidity_action[area_id] = h_action
 
         with open(path, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=DETAIL_FIELDS)
@@ -139,10 +179,144 @@ class HistoryStore:
                     "price_level": data.get("price_level", ""),
                     "price_shift": data.get("price_shift", ""),
                     "co2": data.get("co2", ""),
+                    "pm25": data.get("pm25", ""),
+                    "pm10": data.get("pm10", ""),
+                    "humidity_action": h_action,
+                    "humidify_target": data.get("humidify_target", ""),
+                    "dehumidify_target": data.get("dehumidify_target", ""),
+                    "humidifying_power": data.get("humidifying_power", ""),
                     **{field: data.get(field, "") for field in MODEL_INPUT_FIELDS},
                     **{key: int(mode == run and previous != run) for run, key in START_FIELDS.items()},
+                    **{
+                        key: int(h_action == run and prev_h_action != run)
+                        for run, key in HUMIDITY_START_FIELDS.items()
+                    },
                 }
             )
+
+    def record_plant(self, plant_id: str, data: dict, timestamp: float | None = None) -> None:
+        """Append a heat plant telemetry point to its detail CSV."""
+        self._ensure_dir()
+        ts = timestamp or time.time()
+        path = self._plant_path(plant_id, "detail")
+        self._migrate_header(path, PLANT_DETAIL_FIELDS)
+        with open(path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=PLANT_DETAIL_FIELDS)
+            if os.path.getsize(path) == 0:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": ts,
+                    "state": data.get("state", ""),
+                    "supply_temp": data.get("supply_temp") if data.get("supply_temp") is not None else "",
+                    "return_temp": data.get("return_temp") if data.get("return_temp") is not None else "",
+                    "dhw_temp": data.get("dhw_temp") if data.get("dhw_temp") is not None else "",
+                    "flue_temp": data.get("flue_temp") if data.get("flue_temp") is not None else "",
+                    "delta_t": data.get("delta_t") if data.get("delta_t") is not None else "",
+                    "thermal_kw": data.get("current_thermal_kw", ""),
+                    "burn_rate_per_h": data.get("burn_rate_per_h", ""),
+                    "fuel_consumed_today": data.get("fuel_consumed_today", ""),
+                    "fuel_remaining_kg": (
+                        data.get("fuel_remaining_kg") if data.get("fuel_remaining_kg") is not None else ""
+                    ),
+                    "cost_today": data.get("cost_today", ""),
+                    "ch_pump_active": bool(data.get("ch_pump_active", False)),
+                    "dhw_pump_active": bool(data.get("dhw_pump_active", False)),
+                }
+            )
+
+    def read_plant_detail(
+        self,
+        plant_id: str,
+        max_age: float | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> list[dict]:
+        """Read heat plant detail CSV rows."""
+        if not self._is_safe_id(plant_id):
+            return []
+        return self._read_csv(self._plant_path(plant_id, "detail"), max_age, start_ts, end_ts)
+
+    def read_plant_history(
+        self,
+        plant_id: str,
+        max_age: float | None = None,
+        start_ts: float | None = None,
+        end_ts: float | None = None,
+    ) -> list[dict]:
+        """Read heat plant downsampled history CSV rows."""
+        if not self._is_safe_id(plant_id):
+            return []
+        return self._read_csv(self._plant_path(plant_id, "history"), max_age, start_ts, end_ts)
+
+    def rotate_plant(self, plant_id: str) -> None:
+        """Downsample old heat plant detail rows to history and trim."""
+        if not self._is_safe_id(plant_id):
+            return
+        now = time.time()
+        detail_rows = self.read_plant_detail(plant_id)
+        cutoff = now - DETAIL_MAX_AGE
+        keep = []
+        archive = []
+        for r in detail_rows:
+            ts = self._safe_ts(r)
+            if ts <= 0:
+                continue
+            if ts >= cutoff:
+                keep.append(r)
+            else:
+                archive.append(r)
+        if archive:
+            downsampled = self._downsample_plant(archive, bucket_seconds=300)
+            hist_path = self._plant_path(plant_id, "history")
+            self._migrate_header(hist_path, PLANT_DETAIL_FIELDS)
+            exists = os.path.isfile(hist_path)
+            with open(hist_path, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=PLANT_DETAIL_FIELDS)
+                if not exists:
+                    writer.writeheader()
+                writer.writerows(downsampled)
+        self._rewrite_csv(self._plant_path(plant_id, "detail"), keep, PLANT_DETAIL_FIELDS)
+        history_rows = self.read_plant_history(plant_id)
+        history_cutoff = now - HISTORY_MAX_AGE
+        trimmed = [r for r in history_rows if self._safe_ts(r) >= history_cutoff]
+        if len(trimmed) < len(history_rows):
+            self._rewrite_csv(self._plant_path(plant_id, "history"), trimmed, PLANT_DETAIL_FIELDS)
+
+    def _downsample_plant(self, rows: list[dict], bucket_seconds: int) -> list[dict]:
+        if not rows:
+            return []
+        buckets: dict[int, list[dict]] = {}
+        for row in rows:
+            ts = self._safe_ts(row)
+            if ts <= 0:
+                continue
+            buckets.setdefault(int(ts // bucket_seconds), []).append(row)
+        result = []
+        for bk in sorted(buckets):
+            bucket = buckets[bk]
+            avg_row: dict = {
+                "timestamp": bk * bucket_seconds,
+                "state": bucket[0].get("state", ""),
+                "ch_pump_active": bucket[0].get("ch_pump_active", ""),
+                "dhw_pump_active": bucket[0].get("dhw_pump_active", ""),
+            }
+            for field in (
+                "supply_temp",
+                "return_temp",
+                "dhw_temp",
+                "flue_temp",
+                "delta_t",
+                "thermal_kw",
+                "burn_rate_per_h",
+                "fuel_consumed_today",
+                "fuel_remaining_kg",
+                "cost_today",
+            ):
+                vals = [v for r in bucket if (v := self._float(r.get(field, ""))) is not None]
+                avg_row[field] = round(sum(vals) / len(vals), 2) if vals else ""
+            result.append(avg_row)
+        return result
 
     def read_detail(
         self,
@@ -237,6 +411,7 @@ class HistoryStore:
     def remove_room(self, area_id: str) -> None:
         """Delete all history files for a room."""
         self._last_mode.pop(area_id, None)
+        self._last_humidity_action.pop(area_id, None)
         if not self._is_safe_id(area_id):
             return
         for path in (self._detail_path(area_id), self._history_path(area_id)):
@@ -249,13 +424,16 @@ class HistoryStore:
             return []
         buckets: dict[int, list[dict]] = {}
         starts: dict[int, dict[str, int]] = {}
+        all_start_keys = [*START_FIELDS.values(), *HUMIDITY_START_FIELDS.values()]
         for i, row in enumerate(rows):
             ts = float(row["timestamp"])
             bucket_key = int(ts // bucket_seconds)
             buckets.setdefault(bucket_key, []).append(row)
-            counts = starts.setdefault(bucket_key, dict.fromkeys(START_FIELDS.values(), 0))
+            counts = starts.setdefault(bucket_key, dict.fromkeys(all_start_keys, 0))
             for run, key in START_FIELDS.items():
                 counts[key] += self._row_starts(row, rows[i - 1] if i else None, run, key)
+            for run, key in HUMIDITY_START_FIELDS.items():
+                counts[key] += self._row_starts(row, rows[i - 1] if i else None, run, key, mode_field="humidity_action")
 
         result = []
         for bucket_key in sorted(buckets):
@@ -263,6 +441,7 @@ class HistoryStore:
             avg_row = {
                 "timestamp": bucket_key * bucket_seconds,
                 "mode": bucket[0]["mode"],
+                "humidity_action": bucket[0].get("humidity_action", ""),
                 "window_open": bucket[0].get("window_open", ""),
                 "device_setpoint": bucket[0].get("device_setpoint", ""),
                 "target_reason": bucket[0].get("target_reason", ""),
@@ -283,6 +462,11 @@ class HistoryStore:
                 "price",
                 "price_shift",
                 "co2",
+                "pm25",
+                "pm10",
+                "humidify_target",
+                "dehumidify_target",
+                "humidifying_power",
                 *MODEL_INPUT_FIELDS,
             ):
                 vals = [v for r in bucket if (v := self._float(r.get(field, ""))) is not None]
@@ -304,12 +488,18 @@ class HistoryStore:
             return None
 
     @staticmethod
-    def _row_starts(row: dict, previous: dict | None, run: str, key: str) -> int:
+    def _row_starts(
+        row: dict,
+        previous: dict | None,
+        run: str,
+        key: str,
+        mode_field: str = "mode",
+    ) -> int:
         """Runs of ``run`` starting at ``row``; rows from before the column compare to the row before."""
         try:
             return int(row.get(key, ""))
         except (ValueError, TypeError):
-            return int(row.get("mode") == run and previous is not None and previous.get("mode") != run)
+            return int(row.get(mode_field) == run and previous is not None and previous.get(mode_field) != run)
 
     @staticmethod
     def _safe_ts(row: dict) -> float:
@@ -330,9 +520,10 @@ class HistoryStore:
                 writer.writeheader()
             writer.writerows(rows)
 
-    def _rewrite_csv(self, path: str, rows: list[dict]) -> None:
+    def _rewrite_csv(self, path: str, rows: list[dict], fields: list[str] | None = None) -> None:
         self._ensure_dir()
+        target_fields = fields or DETAIL_FIELDS
         with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=DETAIL_FIELDS, extrasaction="ignore")
+            writer = csv.DictWriter(f, fieldnames=target_fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)

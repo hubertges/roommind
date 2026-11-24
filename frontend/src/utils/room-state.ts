@@ -415,7 +415,7 @@ export function setbackHint(live: RoomLiveData, language: string): RoomHint | nu
   };
 }
 
-/** Stale or polluted air (#267): the CO2 reading when that is the reason, and whether RoomMind ventilates. */
+/** Stale or polluted air (#267): CO2 / PM readings when that is the reason, and whether RoomMind ventilates. */
 function airQualityHint(live: NonNullable<RoomConfig["live"]>, language: string): RoomHint | null {
   if (!live.air_quality_bad) return null;
   const venting = !!live.ventilation_active;
@@ -426,6 +426,33 @@ function airQualityHint(live: NonNullable<RoomConfig["live"]>, language: string)
       severity: "warn",
       key: venting ? "card.hint.air_co2_venting" : "card.hint.air_co2",
       params: { value: formatNumber(Math.round(live.co2), { language }) },
+    };
+  }
+  if (live.air_quality_reason === "pm25" && live.pm25 != null) {
+    return {
+      id: "air_quality",
+      icon: "mdi:blur",
+      severity: "warn",
+      key: venting ? "card.hint.air_pm25_venting" : "card.hint.air_pm25",
+      params: { value: formatNumber(Math.round(live.pm25), { language }) },
+    };
+  }
+  if (live.air_quality_reason === "pm10" && live.pm10 != null) {
+    return {
+      id: "air_quality",
+      icon: "mdi:blur",
+      severity: "warn",
+      key: venting ? "card.hint.air_pm10_venting" : "card.hint.air_pm10",
+      params: { value: formatNumber(Math.round(live.pm10), { language }) },
+    };
+  }
+  if (live.air_quality_reason === "pm1" && live.pm1 != null) {
+    return {
+      id: "air_quality",
+      icon: "mdi:blur",
+      severity: "warn",
+      key: venting ? "card.hint.air_pm1_venting" : "card.hint.air_pm1",
+      params: { value: formatNumber(Math.round(live.pm1), { language }) },
     };
   }
   return {

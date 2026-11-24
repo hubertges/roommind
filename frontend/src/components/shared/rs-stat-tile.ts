@@ -17,8 +17,13 @@ export class RsStatTile extends LitElement {
   @property({ type: String }) public sub = "";
   @property({ type: String }) public info = "";
   @property({ type: Boolean, reflect: true }) public pending = false;
-  @property({ type: String, reflect: true }) public tone: "default" | "heat" | "cool" | "ok" =
-    "default";
+  @property({ type: String, reflect: true }) public tone:
+    | "default"
+    | "heat"
+    | "cool"
+    | "humidify"
+    | "dehumidify"
+    | "ok" = "default";
 
   static styles = [
     tokens,
@@ -34,6 +39,12 @@ export class RsStatTile extends LitElement {
       }
       :host([tone="cool"]) {
         --tile-icon: var(--rs-cool);
+      }
+      :host([tone="humidify"]) {
+        --tile-icon: var(--rs-humidify);
+      }
+      :host([tone="dehumidify"]) {
+        --tile-icon: var(--rs-dehumidify);
       }
       :host([tone="ok"]) {
         --tile-icon: var(--rs-ok);

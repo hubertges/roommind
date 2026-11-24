@@ -1,0 +1,81 @@
+log_heat_plant_fuel:
+  name: Zapisz opał źródła ciepła (kg)
+  description: >-
+    Dodaje zasyp opału do zasobnika/kominka (mode: refill) lub zapisuje ręcznie
+    spaloną ilość opału w kilogramach (mode: burned). Idealne do automatyzacji
+    z tagami NFC lub przyciskiem w kotłowni.
+  fields:
+    plant_id:
+      name: ID źródła ciepła
+      description: >-
+        Opcjonalne ID pieca lub kominka (np. z konfiguracji źródeł ciepła).
+        Jeśli puste, automatycznie wybierze pierwsze źródło na paliwo stałe.
+      required: false
+      selector:
+        text:
+    kg:
+      name: Ilość opału (kg)
+      description: Masa opału w kilogramach (np. 25 dla worka ekogroszku lub pelletu).
+      required: true
+      default: 25
+      selector:
+        number:
+          min: 0.1
+          max: 5000
+          step: 0.5
+          unit_of_measurement: kg
+    mode:
+      name: Tryb zapisu
+      description: >-
+        "refill" = dosyp do zasobnika (zwiększa zapas i kasuje alert dołożenia),
+        "burned" = spalone kg (dolicza do zużycia, kWh, kosztu, popiołu i komina).
+      required: false
+      default: refill
+      selector:
+        select:
+          options:
+            - label: Zasyp / dołożenie do zasobnika (refill)
+              value: refill
+            - label: Spalone paliwo (burned)
+              value: burned
+
+confirm_heat_plant_maintenance:
+  name: Potwierdź obsługę pieca / kominka
+  description: >-
+    Potwierdza wykonanie czynności obsługowej (dołożenie opału, opróżnienie
+    zbiornika na popiół lub czyszczenie komina), zeruje odpowiedni licznik i
+    zamyka aktywne powiadomienie.
+  fields:
+    plant_id:
+      name: ID źródła ciepła
+      description: >-
+        Opcjonalne ID pieca lub kominka. Jeśli puste, wybierze pierwsze źródło
+        na paliwo stałe.
+      required: false
+      selector:
+        text:
+    action:
+      name: Wykonana czynność
+      description: Rodzaj potwierdzanej obsługi pieca lub komina.
+      required: true
+      selector:
+        select:
+          options:
+            - label: Dołożono opał / zasypano zasobnik (refill)
+              value: refill
+            - label: Opróżniono popielnik (ash_cleaned)
+              value: ash_cleaned
+            - label: Wyczyszczono komin (chimney_cleaned)
+              value: chimney_cleaned
+    kg:
+      name: Zasypana masa (kg, tylko dla refill)
+      description: >-
+        Opcjonalna ilość dosypanego opału w kg dla akcji "refill". Jeśli puste,
+        ustawia pełną pojemność zasobnika.
+      required: false
+      selector:
+        number:
+          min: 0.1
+          max: 5000
+          step: 1
+          unit_of_measurement: kg

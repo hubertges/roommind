@@ -45,7 +45,12 @@ import { errorText } from "../utils/errors";
 import { showToast } from "../utils/toast";
 import { fireSaveStatus } from "../utils/events";
 import { deviceAbilities, modeFits, resolveHeatingSystemType } from "../utils/device-utils";
-import { DEFAULT_CO2_THRESHOLD, DEFAULT_OCCUPANCY_ECO_DELAY } from "../utils/constants";
+import {
+  DEFAULT_CO2_THRESHOLD,
+  DEFAULT_OCCUPANCY_ECO_DELAY,
+  DEFAULT_PM10_THRESHOLD,
+  DEFAULT_PM25_THRESHOLD,
+} from "../utils/constants";
 import { NO_OVERRIDE, type EffectiveOverride } from "../utils/override";
 import { tokens } from "../styles/tokens";
 
@@ -112,6 +117,12 @@ const ROOM_FIELDS: [string, RoomFieldSync][] = [
   ["co2_threshold", plain("_co2Threshold", (c) => c?.co2_threshold ?? DEFAULT_CO2_THRESHOLD)],
   ["voc_sensor", plain("_vocSensor", (c) => c?.voc_sensor ?? "")],
   ["voc_threshold", plain("_vocThreshold", (c) => c?.voc_threshold ?? null)],
+  ["pm25_sensor", plain("_pm25Sensor", (c) => c?.pm25_sensor ?? "")],
+  ["pm25_threshold", plain("_pm25Threshold", (c) => c?.pm25_threshold ?? DEFAULT_PM25_THRESHOLD)],
+  ["pm10_sensor", plain("_pm10Sensor", (c) => c?.pm10_sensor ?? "")],
+  ["pm10_threshold", plain("_pm10Threshold", (c) => c?.pm10_threshold ?? DEFAULT_PM10_THRESHOLD)],
+  ["pm1_sensor", plain("_pm1Sensor", (c) => c?.pm1_sensor ?? "")],
+  ["pm1_threshold", plain("_pm1Threshold", (c) => c?.pm1_threshold ?? null)],
   ["ventilation_entity", plain("_ventilationEntity", (c) => c?.ventilation_entity ?? "")],
   ["humidity_max", plain("_humidityMax", (c) => c?.humidity_max ?? null)],
   ["humidity_min", plain("_humidityMin", (c) => c?.humidity_min ?? null)],
@@ -284,6 +295,12 @@ export class RsRoomDetail extends LitElement {
   @state() private _co2Threshold = DEFAULT_CO2_THRESHOLD;
   @state() private _vocSensor = "";
   @state() private _vocThreshold: number | null = null;
+  @state() private _pm25Sensor = "";
+  @state() private _pm25Threshold: number | null = DEFAULT_PM25_THRESHOLD;
+  @state() private _pm10Sensor = "";
+  @state() private _pm10Threshold: number | null = DEFAULT_PM10_THRESHOLD;
+  @state() private _pm1Sensor = "";
+  @state() private _pm1Threshold: number | null = null;
   @state() private _ventilationEntity = "";
   @state() private _humidityMax: number | null = null;
   @state() private _humidityMin: number | null = null;
@@ -855,6 +872,12 @@ export class RsRoomDetail extends LitElement {
         .co2Threshold=${this._co2Threshold}
         .vocSensor=${this._vocSensor}
         .vocThreshold=${this._vocThreshold}
+        .pm25Sensor=${this._pm25Sensor}
+        .pm25Threshold=${this._pm25Threshold}
+        .pm10Sensor=${this._pm10Sensor}
+        .pm10Threshold=${this._pm10Threshold}
+        .pm1Sensor=${this._pm1Sensor}
+        .pm1Threshold=${this._pm1Threshold}
         .ventilationEntity=${this._ventilationEntity}
         .humidityMax=${this._humidityMax}
         .humidityMin=${this._humidityMin}
@@ -1091,6 +1114,12 @@ export class RsRoomDetail extends LitElement {
             .co2Threshold=${this._co2Threshold}
             .vocSensor=${this._vocSensor}
             .vocThreshold=${this._vocThreshold}
+            .pm25Sensor=${this._pm25Sensor}
+            .pm25Threshold=${this._pm25Threshold}
+            .pm10Sensor=${this._pm10Sensor}
+            .pm10Threshold=${this._pm10Threshold}
+            .pm1Sensor=${this._pm1Sensor}
+            .pm1Threshold=${this._pm1Threshold}
             .ventilationEntity=${this._ventilationEntity}
             .humidityMax=${this._humidityMax}
             .humidityMin=${this._humidityMin}
@@ -1439,6 +1468,18 @@ export class RsRoomDetail extends LitElement {
       this._vocSensor = value as string;
     } else if (key === "voc_threshold") {
       this._vocThreshold = value as number | null;
+    } else if (key === "pm25_sensor") {
+      this._pm25Sensor = value as string;
+    } else if (key === "pm25_threshold") {
+      this._pm25Threshold = value as number | null;
+    } else if (key === "pm10_sensor") {
+      this._pm10Sensor = value as string;
+    } else if (key === "pm10_threshold") {
+      this._pm10Threshold = value as number | null;
+    } else if (key === "pm1_sensor") {
+      this._pm1Sensor = value as string;
+    } else if (key === "pm1_threshold") {
+      this._pm1Threshold = value as number | null;
     } else if (key === "ventilation_entity") {
       this._ventilationEntity = value as string;
     } else if (key === "humidity_max") {

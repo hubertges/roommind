@@ -14,14 +14,18 @@ import {
   DEFAULT_HUMIDITY_MAX,
   DEFAULT_HUMIDITY_MIN,
   DEFAULT_OCCUPANCY_ECO_DELAY,
+  DEFAULT_PM10_THRESHOLD,
+  DEFAULT_PM25_THRESHOLD,
   HUMIDITY_LIMIT_GAP,
   MAX_CO2_THRESHOLD,
   MAX_HUMIDITY_MAX,
   MAX_HUMIDITY_MIN,
+  MAX_PM_THRESHOLD,
   MIN_CO2_THRESHOLD,
   MIN_HUMIDITY_MAX,
   MIN_HUMIDITY_MIN,
   MIN_OCCUPANCY_ECO_DELAY,
+  MIN_PM_THRESHOLD,
 } from "../utils/constants";
 import "./shared/rs-field";
 import "./shared/rs-number-field";
@@ -37,6 +41,9 @@ type SensorKind =
   | "window"
   | "co2"
   | "voc"
+  | "pm25"
+  | "pm10"
+  | "pm1"
   | "ventilation"
   | "dehumidifier"
   | "humidifier"
@@ -66,6 +73,9 @@ const SINGLE_KEYS: Record<SingleKind, string> = {
   humidity: "humidity_sensor",
   co2: "co2_sensor",
   voc: "voc_sensor",
+  pm25: "pm25_sensor",
+  pm10: "pm10_sensor",
+  pm1: "pm1_sensor",
   ventilation: "ventilation_entity",
   dehumidifier: "dehumidifier_entity",
   humidifier: "humidifier_entity",
@@ -103,6 +113,12 @@ export class RsSensorSection extends LitElement {
   @property({ type: Number }) public co2Threshold = DEFAULT_CO2_THRESHOLD;
   @property({ type: String }) public vocSensor = "";
   @property({ attribute: false }) public vocThreshold: number | null = null;
+  @property({ type: String }) public pm25Sensor = "";
+  @property({ attribute: false }) public pm25Threshold: number | null = DEFAULT_PM25_THRESHOLD;
+  @property({ type: String }) public pm10Sensor = "";
+  @property({ attribute: false }) public pm10Threshold: number | null = DEFAULT_PM10_THRESHOLD;
+  @property({ type: String }) public pm1Sensor = "";
+  @property({ attribute: false }) public pm1Threshold: number | null = null;
   @property({ type: String }) public ventilationEntity = "";
   /** Humidity limits in % RH, null = that side not regulated (#518, #526). */
   @property({ attribute: false }) public humidityMax: number | null = null;
@@ -403,7 +419,61 @@ export class RsSensorSection extends LitElement {
           : nothing
       }
       ${
-        this.ventilationEntity && (this.co2Sensor || this.vocSensor || this._ventsForHumidity)
+        this.pm25Sensor
+          ? this._row(
+              this.pm25Sensor,
+              "mdi:blur",
+              [
+                localize("detail.sensors.pm25", l),
+                reason === "pm25" ? localize("sensors.air_bad", l) : "",
+              ]
+                .filter(Boolean)
+                .join(" · "),
+              this._numberValue(this.pm25Sensor),
+              reason === "pm25" ? "var(--rs-warn)" : "",
+            )
+          : nothing
+      }
+      ${
+        this.pm10Sensor
+          ? this._row(
+              this.pm10Sensor,
+              "mdi:blur",
+              [
+                localize("detail.sensors.pm10", l),
+                reason === "pm10" ? localize("sensors.air_bad", l) : "",
+              ]
+                .filter(Boolean)
+                .join(" · "),
+              this._numberValue(this.pm10Sensor),
+              reason === "pm10" ? "var(--rs-warn)" : "",
+            )
+          : nothing
+      }
+      ${
+        this.pm1Sensor
+          ? this._row(
+              this.pm1Sensor,
+              "mdi:blur",
+              [
+                localize("detail.sensors.pm1", l),
+                reason === "pm1" ? localize("sensors.air_bad", l) : "",
+              ]
+                .filter(Boolean)
+                .join(" · "),
+              this._numberValue(this.pm1Sensor),
+              reason === "pm1" ? "var(--rs-warn)" : "",
+            )
+          : nothing
+      }
+      ${
+        this.ventilationEntity &&
+        (this.co2Sensor ||
+          this.vocSensor ||
+          this.pm25Sensor ||
+          this.pm10Sensor ||
+          this.pm1Sensor ||
+          this._ventsForHumidity)
           ? this._row(
               this.ventilationEntity,
               "mdi:fan",
@@ -558,6 +628,9 @@ export class RsSensorSection extends LitElement {
       "windowSensors",
       "co2Sensor",
       "vocSensor",
+      "pm25Sensor",
+      "pm10Sensor",
+      "pm1Sensor",
       "ventilationEntity",
       "dehumidifierEntity",
       "humidifierEntity",
@@ -603,6 +676,12 @@ export class RsSensorSection extends LitElement {
         return (
           domain === "sensor" && (VOC_CLASSES.includes(dc ?? "") || (!dc && /voc/i.test(entityId)))
         );
+      case "pm25":
+        return domain === "sensor" && (dc === "pm25" || (!dc && /pm2[_.]?5/i.test(entityId)));
+      case "pm10":
+        return domain === "sensor" && (dc === "pm10" || (!dc && /pm10/i.test(entityId)));
+      case "pm1":
+        return domain === "sensor" && (dc === "pm1" || (!dc && /pm1(?![0-9])/i.test(entityId)));
       case "ventilation":
       case "room_fan":
         return VENTILATION_DOMAINS.includes(domain);
@@ -622,6 +701,9 @@ export class RsSensorSection extends LitElement {
       humidity: this.humiditySensor,
       co2: this.co2Sensor,
       voc: this.vocSensor,
+      pm25: this.pm25Sensor,
+      pm10: this.pm10Sensor,
+      pm1: this.pm1Sensor,
       ventilation: this.ventilationEntity,
       dehumidifier: this.dehumidifierEntity,
       humidifier: this.humidifierEntity,
@@ -678,8 +760,17 @@ export class RsSensorSection extends LitElement {
             ${this._renderKind("occupancy", inArea("occupancy"), this._renderOccupancySettings(l))}
             ${this._renderKind("co2", inArea("co2"), this._renderCo2Settings(l))}
             ${this._renderKind("voc", inArea("voc"), this._renderVocSettings(l))}
+            ${this._renderKind("pm25", inArea("pm25"), this._renderPmSettings("pm25", l))}
+            ${this._renderKind("pm10", inArea("pm10"), this._renderPmSettings("pm10", l))}
+            ${this._renderKind("pm1", inArea("pm1"), this._renderPmSettings("pm1", l))}
             ${
-              this.co2Sensor || this.vocSensor || this.ventilationEntity || this._ventsForHumidity
+              this.co2Sensor ||
+              this.vocSensor ||
+              this.pm25Sensor ||
+              this.pm10Sensor ||
+              this.pm1Sensor ||
+              this.ventilationEntity ||
+              this._ventsForHumidity
                 ? this._renderKind(
                     "ventilation",
                     inArea("ventilation"),
@@ -758,6 +849,24 @@ export class RsSensorSection extends LitElement {
           icon: "mdi:air-filter",
           title: "detail.sensors.voc",
           info: "sensors.voc_info",
+        } as const;
+      case "pm25":
+        return {
+          icon: "mdi:blur",
+          title: "detail.sensors.pm25",
+          info: "sensors.pm25_info",
+        } as const;
+      case "pm10":
+        return {
+          icon: "mdi:blur",
+          title: "detail.sensors.pm10",
+          info: "sensors.pm10_info",
+        } as const;
+      case "pm1":
+        return {
+          icon: "mdi:blur",
+          title: "detail.sensors.pm1",
+          info: "sensors.pm1_info",
         } as const;
       case "ventilation":
         return {
@@ -903,6 +1012,9 @@ export class RsSensorSection extends LitElement {
       window: ["binary_sensor"],
       co2: ["sensor"],
       voc: ["sensor"],
+      pm25: ["sensor"],
+      pm10: ["sensor"],
+      pm1: ["sensor"],
       ventilation: VENTILATION_DOMAINS,
       dehumidifier: HUMIDITY_DEVICE_DOMAINS,
       humidifier: HUMIDITY_DEVICE_DOMAINS,
@@ -940,7 +1052,15 @@ export class RsSensorSection extends LitElement {
   private _kindValue(kind: SensorKind, entityId: string): string {
     if (kind === "temp") return this._tempValue(entityId);
     if (kind === "humidity") return this._humidityValue(entityId);
-    if (kind === "co2" || kind === "voc" || kind === "sun") return this._numberValue(entityId);
+    if (
+      kind === "co2" ||
+      kind === "voc" ||
+      kind === "pm25" ||
+      kind === "pm10" ||
+      kind === "pm1" ||
+      kind === "sun"
+    )
+      return this._numberValue(entityId);
     if (
       kind === "ventilation" ||
       kind === "dehumidifier" ||
@@ -1363,6 +1483,37 @@ export class RsSensorSection extends LitElement {
       .value=${this.vocThreshold}
       @value-changed=${(e: CustomEvent<{ value: number | null }>) =>
         this._fireSensorChanged("voc_threshold", e.detail.value)}
+    ></rs-number-field>`;
+  }
+
+  private _renderPmSettings(kind: "pm25" | "pm10" | "pm1", l: string) {
+    const sensor =
+      kind === "pm25" ? this.pm25Sensor : kind === "pm10" ? this.pm10Sensor : this.pm1Sensor;
+    if (!sensor) return nothing;
+    const value =
+      kind === "pm25"
+        ? this.pm25Threshold
+        : kind === "pm10"
+          ? this.pm10Threshold
+          : this.pm1Threshold;
+    const infoKey: TranslationKey =
+      kind === "pm25"
+        ? "sensors.pm25_threshold_info"
+        : kind === "pm10"
+          ? "sensors.pm10_threshold_info"
+          : "sensors.pm1_threshold_info";
+    return html`<rs-number-field
+      .label=${localize("sensors.air_threshold", l)}
+      .info=${localize(infoKey, l)}
+      .hint=${value == null ? localize("sensors.voc_not_judged", l) : ""}
+      suffix="µg/m³"
+      allow-empty
+      .min=${MIN_PM_THRESHOLD}
+      .max=${MAX_PM_THRESHOLD}
+      .step=${1}
+      .value=${value}
+      @value-changed=${(e: CustomEvent<{ value: number | null }>) =>
+        this._fireSensorChanged(`${kind}_threshold`, e.detail.value)}
     ></rs-number-field>`;
   }
 

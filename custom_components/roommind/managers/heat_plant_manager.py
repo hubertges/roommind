@@ -1,13 +1,22 @@
-"""Heat plant manager: boilers (coal/pellet/wood/gas), air/water heaters, and heat pumps.
+"""Heat plant manager: boilers (coal/pellet/wood/gas), fireplaces, underfloor manifolds, heaters, and heat pumps.
 
 Manages:
+- Multiple cooperating heat sources (e.g. ekogroszek coal boiler + fireplace + underfloor heating)
+  with priority handling and parent/child loop propagation (e.g. underfloor manifold fed by boiler).
+- Non-extinguishable solid-fuel safety ("cannot_extinguish"): coal boilers, wood boilers, and fireplaces
+  are never commanded to completely turn off on normal idle; instead they transition to a safe
+  fire-hold / ember-standby mode ("hold") with minimum power tracking and overheat heat-dumping.
 - Assigned radiators (TRVs), underfloor heating, heaters, and rooms per heat plant.
 - Supply, return, DHW (CWU), and flue/buffer temperature monitoring + delta-T calculation.
 - Active control of the heat source entity (climate.*, water_heater.*, switch.*, fan.*, input_boolean.*)
   and circulation pumps (C.O. central heating pump and CWU domestic hot water pump) with
   minimum supply temperature protection, boiler overheat protection, and DHW differential hysteresis.
-- Fuel calorific value conversion (e.g. coal MJ/kg -> kWh/kg -> usable thermal kWh/kg with efficiency,
-  gas kWh/m³, heat pump COP) and real-time + cumulative energy/fuel consumption and cost tracking.
+- Fuel consumption in kg from: HA cumulative kg/g sensor, auger/feeder screw entity (podajnik) +
+  kg/h throughput, manual kg entries, energy sensor, or calorific/power estimation.
+- Maintenance tracking & throttled notifications for:
+  1. Fuel refill / top-up (dołożenie opału / zasyp zasobnika)
+  2. Ash container emptying (posprzątanie zbiornika na popiół)
+  3. Chimney cleaning (czyszczenie komina)
 """
 
 from __future__ import annotations
@@ -20,7 +29,16 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
 
-from ..const import MODE_HEATING, make_roommind_context
+from ..const import (
+    DEFAULT_HEAT_PLANT_NOTIFICATION_COOLDOWN_MINUTES,
+    MODE_HEATING,
+    make_roommind_context,
+)
+from ..utils.notification_utils import (
+    NotificationThrottler,
+    async_send_notification,
+    dismiss_notification,
+)
 from ..utils.sensor_utils import read_sensor_value
 from ..utils.temp_utils import celsius_to_ha_temp, ha_temp_to_celsius
 
@@ -32,6 +50,8 @@ _LOGGER = logging.getLogger(__name__)
 PLANT_TYPE_COAL_BOILER = "coal_boiler"
 PLANT_TYPE_PELLET_BOILER = "pellet_boiler"
 PLANT_TYPE_WOOD_BOILER = "wood_boiler"
+PLANT_TYPE_FIREPLACE = "fireplace"
+PLANT_TYPE_UNDERFLOOR = "underfloor_manifold"
 PLANT_TYPE_GAS_BOILER = "gas_boiler"
 PLANT_TYPE_ELECTRIC_HEATER = "electric_heater"
 PLANT_TYPE_AIR_HEATER = "air_heater"
@@ -41,10 +61,19 @@ HEAT_PLANT_TYPES = (
     PLANT_TYPE_COAL_BOILER,
     PLANT_TYPE_PELLET_BOILER,
     PLANT_TYPE_WOOD_BOILER,
+    PLANT_TYPE_FIREPLACE,
+    PLANT_TYPE_UNDERFLOOR,
     PLANT_TYPE_GAS_BOILER,
     PLANT_TYPE_ELECTRIC_HEATER,
     PLANT_TYPE_AIR_HEATER,
     PLANT_TYPE_HEAT_PUMP,
+)
+
+# Solid-fuel heat sources that maintain a live firebed and cannot be switched off completely on idle
+NON_EXTINGUISHABLE_PLANT_TYPES = (
+    PLANT_TYPE_COAL_BOILER,
+    PLANT_TYPE_WOOD_BOILER,
+    PLANT_TYPE_FIREPLACE,
 )
 
 FUEL_TYPE_COAL = "coal"
@@ -61,6 +90,8 @@ FUEL_TYPES = (
     FUEL_TYPE_ELECTRICITY,
 )
 
+SOLID_FUEL_TYPES = (FUEL_TYPE_COAL, FUEL_TYPE_PELLET, FUEL_TYPE_WOOD)
+
 HEAT_PLANT_SOURCE_DOMAINS = (
     "climate",
     "water_heater",
@@ -72,6 +103,7 @@ HEAT_PLANT_PUMP_DOMAINS = ("switch", "input_boolean", "fan")
 
 # 1 kWh = 3.6 MJ
 MJ_PER_KWH = 3.6
+NOTIF_PLANT_PREFIX = "roommind_plant_"
 
 
 def mj_kg_to_kwh_kg(calorific_mj_kg: float) -> float:
@@ -90,20 +122,26 @@ def usable_kwh_per_kg(calorific_mj_kg: float, efficiency_pct: float) -> float:
 
 @dataclass
 class HeatPlantConfig:
-    """Configuration for a single boiler, heater, or heat pump."""
+    """Configuration for a single boiler, fireplace, underfloor manifold, heater, or heat pump."""
 
     id: str
     name: str
     plant_type: str = PLANT_TYPE_COAL_BOILER
     enabled: bool = True
+    # Multi-source coordination
+    priority: int = 1  # Lower number = higher priority (e.g. 1 = fireplace, 2 = main boiler)
+    parent_plant_id: str = ""  # Optional parent heat plant feeding this loop (e.g. underfloor -> boiler)
+    # Non-extinguishable solid-fuel protection (fire-hold / podtrzymanie ognia)
+    cannot_extinguish: bool = True
+    min_power_pct: float = 12.0  # Ember/standby burn fraction [%] when fire is held
     # Assigned radiator/TRV/UFH/AC climate entity IDs and/or room area_ids
     assigned_devices: list[str] = field(default_factory=list)
     assigned_rooms: list[str] = field(default_factory=list)
     # Main heat source entity (climate.*, water_heater.*, switch.*, input_boolean.*, fan.*)
     source_entity: str = ""
     target_supply_temp: float = 55.0
-    idle_supply_temp: float = 35.0
-    off_mode: str = "off"  # "off" | "temperature"
+    idle_supply_temp: float = 42.0
+    off_mode: str = "temperature"  # "off" | "temperature"
     min_rooms_demand: int = 1
     # Thermometers (sensor.* / input_number.*)
     supply_temp_sensor: str = ""
@@ -129,7 +167,23 @@ class HeatPlantConfig:
     fuel_price: float = 1500.0  # Price: per ton (1000 kg) for coal/pellet/wood, per m³ for gas, per kWh for electricity
     currency: str = "PLN"
     energy_sensor: str = ""  # Optional HA sensor (kWh or W/kW)
-    fuel_consumption_sensor: str = ""  # Optional HA sensor (kg or m³)
+    fuel_consumption_sensor: str = ""  # Optional HA sensor (kg, g or m³)
+    # Auger/feeder screw (podajnik) kg tracking & hopper/ash/chimney maintenance
+    feeder_entity: str = ""  # Optional switch/binary_sensor for auger/podajnik
+    feeder_kg_per_hour: float = 12.0  # Feeder throughput [kg/h] of continuous screw run
+    hopper_capacity_kg: float = 100.0  # Fuel hopper / load capacity [kg]
+    hopper_level_sensor: str = ""  # Optional HA sensor (% or kg remaining)
+    ash_content_pct: float = 7.0  # Ash percentage in fuel [%] (coal ~7%, pellet ~0.7%, wood ~1.5%)
+    # Maintenance notifications
+    notify_refill_enabled: bool = False
+    refill_alert_kg: float = 20.0
+    refill_alert_pct: float = 20.0
+    notify_ash_enabled: bool = False
+    ash_clean_interval_kg: float = 150.0
+    ash_clean_interval_days: int = 7
+    notify_chimney_enabled: bool = False
+    chimney_clean_interval_kg: float = 1000.0
+    chimney_clean_interval_days: int = 90
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HeatPlantConfig:
@@ -142,6 +196,8 @@ class HeatPlantConfig:
             PLANT_TYPE_COAL_BOILER: FUEL_TYPE_COAL,
             PLANT_TYPE_PELLET_BOILER: FUEL_TYPE_PELLET,
             PLANT_TYPE_WOOD_BOILER: FUEL_TYPE_WOOD,
+            PLANT_TYPE_FIREPLACE: FUEL_TYPE_WOOD,
+            PLANT_TYPE_UNDERFLOOR: FUEL_TYPE_COAL,
             PLANT_TYPE_GAS_BOILER: FUEL_TYPE_GAS,
             PLANT_TYPE_ELECTRIC_HEATER: FUEL_TYPE_ELECTRICITY,
             PLANT_TYPE_AIR_HEATER: FUEL_TYPE_ELECTRICITY,
@@ -151,25 +207,47 @@ class HeatPlantConfig:
         if fuel_type not in FUEL_TYPES:
             fuel_type = default_fuel
 
+        default_cannot_extinguish = plant_type in NON_EXTINGUISHABLE_PLANT_TYPES
+        if "cannot_extinguish" in data:
+            cannot_extinguish = bool(data["cannot_extinguish"])
+        else:
+            cannot_extinguish = default_cannot_extinguish
+
+        default_ash_pct = {
+            FUEL_TYPE_COAL: 7.0,
+            FUEL_TYPE_PELLET: 0.7,
+            FUEL_TYPE_WOOD: 1.5,
+        }.get(fuel_type, 0.0)
+
+        default_off_mode = "temperature" if cannot_extinguish else "off"
+        default_min_supply = 22.0 if plant_type == PLANT_TYPE_UNDERFLOOR else 40.0
+        default_overrun_temp = 48.0 if plant_type == PLANT_TYPE_UNDERFLOOR else 80.0
+
         return cls(
             id=str(data.get("id") or ""),
             name=str(data.get("name") or ""),
             plant_type=plant_type,
             enabled=bool(data.get("enabled", True)),
+            priority=max(1, min(20, int(data.get("priority", 1) or 1))),
+            parent_plant_id=str(data.get("parent_plant_id") or ""),
+            cannot_extinguish=cannot_extinguish,
+            min_power_pct=max(0.0, min(50.0, float(data.get("min_power_pct", 12.0 if cannot_extinguish else 0.0)))),
             assigned_devices=[str(x) for x in (data.get("assigned_devices") or []) if x],
             assigned_rooms=[str(x) for x in (data.get("assigned_rooms") or []) if x],
             source_entity=str(data.get("source_entity") or ""),
-            target_supply_temp=float(data.get("target_supply_temp", 55.0) or 55.0),
-            idle_supply_temp=float(data.get("idle_supply_temp", 35.0) or 35.0),
-            off_mode=str(data.get("off_mode") or "off"),
+            target_supply_temp=float(data.get("target_supply_temp", 35.0 if plant_type == PLANT_TYPE_UNDERFLOOR else 55.0) or 55.0),
+            idle_supply_temp=float(
+                data.get("idle_supply_temp", 42.0 if cannot_extinguish else 35.0) or 35.0
+            ),
+            off_mode=str(data.get("off_mode") or default_off_mode),
             min_rooms_demand=max(1, int(data.get("min_rooms_demand", 1) or 1)),
             supply_temp_sensor=str(data.get("supply_temp_sensor") or ""),
             return_temp_sensor=str(data.get("return_temp_sensor") or ""),
             dhw_temp_sensor=str(data.get("dhw_temp_sensor") or ""),
             flue_temp_sensor=str(data.get("flue_temp_sensor") or ""),
             ch_pump_entity=str(data.get("ch_pump_entity") or ""),
-            ch_pump_min_supply_temp=float(data.get("ch_pump_min_supply_temp", 40.0) or 0.0),
-            ch_pump_overrun_temp=float(data.get("ch_pump_overrun_temp", 80.0) or 80.0),
+            ch_pump_min_supply_temp=float(data.get("ch_pump_min_supply_temp", default_min_supply) or 0.0),
+            ch_pump_overrun_temp=float(data.get("ch_pump_overrun_temp", default_overrun_temp) or default_overrun_temp),
             dhw_pump_entity=str(data.get("dhw_pump_entity") or ""),
             dhw_target_temp=float(data.get("dhw_target_temp", 50.0) or 50.0),
             dhw_hysteresis=max(0.5, float(data.get("dhw_hysteresis", 3.0) or 3.0)),
@@ -184,6 +262,20 @@ class HeatPlantConfig:
             currency=str(data.get("currency") or "PLN"),
             energy_sensor=str(data.get("energy_sensor") or ""),
             fuel_consumption_sensor=str(data.get("fuel_consumption_sensor") or ""),
+            feeder_entity=str(data.get("feeder_entity") or ""),
+            feeder_kg_per_hour=max(0.1, float(data.get("feeder_kg_per_hour", 12.0) or 12.0)),
+            hopper_capacity_kg=max(1.0, float(data.get("hopper_capacity_kg", 100.0) or 100.0)),
+            hopper_level_sensor=str(data.get("hopper_level_sensor") or ""),
+            ash_content_pct=max(0.0, min(40.0, float(data.get("ash_content_pct", default_ash_pct)))),
+            notify_refill_enabled=bool(data.get("notify_refill_enabled", False)),
+            refill_alert_kg=max(0.0, float(data.get("refill_alert_kg", 20.0) or 0.0)),
+            refill_alert_pct=max(0.0, min(100.0, float(data.get("refill_alert_pct", 20.0) or 0.0))),
+            notify_ash_enabled=bool(data.get("notify_ash_enabled", False)),
+            ash_clean_interval_kg=max(0.0, float(data.get("ash_clean_interval_kg", 150.0) or 0.0)),
+            ash_clean_interval_days=max(0, int(data.get("ash_clean_interval_days", 7) or 0)),
+            notify_chimney_enabled=bool(data.get("notify_chimney_enabled", False)),
+            chimney_clean_interval_kg=max(0.0, float(data.get("chimney_clean_interval_kg", 1000.0) or 0.0)),
+            chimney_clean_interval_days=max(0, int(data.get("chimney_clean_interval_days", 90) or 0)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -193,6 +285,10 @@ class HeatPlantConfig:
             "name": self.name,
             "plant_type": self.plant_type,
             "enabled": self.enabled,
+            "priority": self.priority,
+            "parent_plant_id": self.parent_plant_id,
+            "cannot_extinguish": self.cannot_extinguish,
+            "min_power_pct": self.min_power_pct,
             "assigned_devices": list(self.assigned_devices),
             "assigned_rooms": list(self.assigned_rooms),
             "source_entity": self.source_entity,
@@ -221,6 +317,20 @@ class HeatPlantConfig:
             "currency": self.currency,
             "energy_sensor": self.energy_sensor,
             "fuel_consumption_sensor": self.fuel_consumption_sensor,
+            "feeder_entity": self.feeder_entity,
+            "feeder_kg_per_hour": self.feeder_kg_per_hour,
+            "hopper_capacity_kg": self.hopper_capacity_kg,
+            "hopper_level_sensor": self.hopper_level_sensor,
+            "ash_content_pct": self.ash_content_pct,
+            "notify_refill_enabled": self.notify_refill_enabled,
+            "refill_alert_kg": self.refill_alert_kg,
+            "refill_alert_pct": self.refill_alert_pct,
+            "notify_ash_enabled": self.notify_ash_enabled,
+            "ash_clean_interval_kg": self.ash_clean_interval_kg,
+            "ash_clean_interval_days": self.ash_clean_interval_days,
+            "notify_chimney_enabled": self.notify_chimney_enabled,
+            "chimney_clean_interval_kg": self.chimney_clean_interval_kg,
+            "chimney_clean_interval_days": self.chimney_clean_interval_days,
         }
 
 
@@ -243,6 +353,14 @@ class HeatPlantRuntimeState:
     fuel_consumed_total: float = 0.0
     cost_today: float = 0.0
     cost_total: float = 0.0
+    # Hopper & maintenance tracking
+    fuel_loaded_kg: float | None = None  # Amount loaded at last refill
+    fuel_since_refill_kg: float = 0.0
+    fuel_since_ash_clean_kg: float = 0.0
+    fuel_since_chimney_clean_kg: float = 0.0
+    last_refill_ts: float | None = None
+    last_ash_clean_ts: float | None = None
+    last_chimney_clean_ts: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -260,23 +378,26 @@ class HeatPlantRuntimeState:
             "fuel_consumed_total": round(self.fuel_consumed_total, 4),
             "cost_today": round(self.cost_today, 4),
             "cost_total": round(self.cost_total, 4),
+            "fuel_loaded_kg": round(self.fuel_loaded_kg, 4) if self.fuel_loaded_kg is not None else None,
+            "fuel_since_refill_kg": round(self.fuel_since_refill_kg, 4),
+            "fuel_since_ash_clean_kg": round(self.fuel_since_ash_clean_kg, 4),
+            "fuel_since_chimney_clean_kg": round(self.fuel_since_chimney_clean_kg, 4),
+            "last_refill_ts": self.last_refill_ts,
+            "last_ash_clean_ts": self.last_ash_clean_ts,
+            "last_chimney_clean_ts": self.last_chimney_clean_ts,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HeatPlantRuntimeState:
+        def _opt_float(key: str) -> float | None:
+            v = data.get(key)
+            return float(v) if isinstance(v, (int, float)) else None
+
         return cls(
             day_str=str(data.get("day_str") or ""),
             dhw_charging=bool(data.get("dhw_charging", False)),
-            last_energy_reading=(
-                float(data["last_energy_reading"])
-                if isinstance(data.get("last_energy_reading"), (int, float))
-                else None
-            ),
-            last_fuel_reading=(
-                float(data["last_fuel_reading"])
-                if isinstance(data.get("last_fuel_reading"), (int, float))
-                else None
-            ),
+            last_energy_reading=_opt_float("last_energy_reading"),
+            last_fuel_reading=_opt_float("last_fuel_reading"),
             runtime_hours_today=float(data.get("runtime_hours_today", 0.0) or 0.0),
             runtime_hours_total=float(data.get("runtime_hours_total", 0.0) or 0.0),
             thermal_kwh_today=float(data.get("thermal_kwh_today", 0.0) or 0.0),
@@ -287,29 +408,52 @@ class HeatPlantRuntimeState:
             fuel_consumed_total=float(data.get("fuel_consumed_total", 0.0) or 0.0),
             cost_today=float(data.get("cost_today", 0.0) or 0.0),
             cost_total=float(data.get("cost_total", 0.0) or 0.0),
+            fuel_loaded_kg=_opt_float("fuel_loaded_kg"),
+            fuel_since_refill_kg=float(data.get("fuel_since_refill_kg", 0.0) or 0.0),
+            fuel_since_ash_clean_kg=float(data.get("fuel_since_ash_clean_kg", 0.0) or 0.0),
+            fuel_since_chimney_clean_kg=float(data.get("fuel_since_chimney_clean_kg", 0.0) or 0.0),
+            last_refill_ts=_opt_float("last_refill_ts"),
+            last_ash_clean_ts=_opt_float("last_ash_clean_ts"),
+            last_chimney_clean_ts=_opt_float("last_chimney_clean_ts"),
         )
 
 
 class HeatPlantManager:
-    """Evaluates and controls boilers, heaters, heat pumps, circulation pumps, and fuel/cost telemetry."""
+    """Evaluates and controls boilers, fireplaces, underfloor manifolds, heaters, heat pumps, and maintenance."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self._plants: dict[str, HeatPlantConfig] = {}
         self._states: dict[str, HeatPlantRuntimeState] = {}
         self._live: dict[str, dict[str, Any]] = {}
+        self._throttler = NotificationThrottler()
         self.state_dirty: bool = False
 
     def load_configs(self, configs: list[dict[str, Any]]) -> None:
         """Load heat plant configurations from settings."""
         new_plants: dict[str, HeatPlantConfig] = {}
+        now = time.time()
         for raw in configs:
             if not isinstance(raw, dict) or not raw.get("id"):
                 continue
             cfg = HeatPlantConfig.from_dict(raw)
             new_plants[cfg.id] = cfg
             if cfg.id not in self._states:
-                self._states[cfg.id] = HeatPlantRuntimeState()
+                st = HeatPlantRuntimeState(
+                    fuel_loaded_kg=cfg.hopper_capacity_kg if cfg.fuel_type in SOLID_FUEL_TYPES else None,
+                    last_refill_ts=now,
+                    last_ash_clean_ts=now,
+                    last_chimney_clean_ts=now,
+                )
+                self._states[cfg.id] = st
+            else:
+                st = self._states[cfg.id]
+                if st.fuel_loaded_kg is None and cfg.fuel_type in SOLID_FUEL_TYPES:
+                    st.fuel_loaded_kg = cfg.hopper_capacity_kg
+                if st.last_ash_clean_ts is None:
+                    st.last_ash_clean_ts = now
+                if st.last_chimney_clean_ts is None:
+                    st.last_chimney_clean_ts = now
         for old_id in list(self._states):
             if old_id not in new_plants:
                 del self._states[old_id]
@@ -346,11 +490,109 @@ class HeatPlantManager:
                     last_ts=st.last_ts,
                     last_energy_reading=st.last_energy_reading,
                     last_fuel_reading=st.last_fuel_reading,
+                    fuel_loaded_kg=st.fuel_loaded_kg,
+                    fuel_since_refill_kg=st.fuel_since_refill_kg,
+                    fuel_since_ash_clean_kg=st.fuel_since_ash_clean_kg,
+                    fuel_since_chimney_clean_kg=st.fuel_since_chimney_clean_kg,
+                    last_refill_ts=st.last_refill_ts,
+                    last_ash_clean_ts=st.last_ash_clean_ts,
+                    last_chimney_clean_ts=st.last_chimney_clean_ts,
                 )
                 changed = True
         if changed:
             self.state_dirty = True
         return changed
+
+    def log_fuel(self, plant_id: str, kg: float, mode: str = "burned") -> bool:
+        """Manually log fuel burned (kg) or refilled into hopper/fireplace (kg).
+
+        - ``mode == "burned"``: Adds kg to today/total consumption, computes kWh & cost,
+          and advances refill/ash/chimney counters.
+        - ``mode == "refill"``: Records a fuel top-up / hopper fill of *kg* (or adds to remaining)
+          and clears the refill alert.
+        """
+        if plant_id not in self._plants or kg <= 0:
+            return False
+        plant = self._plants[plant_id]
+        st = self._states.setdefault(plant_id, HeatPlantRuntimeState())
+        now = time.time()
+        today = dt_util.now().date().isoformat()
+        if st.day_str != today:
+            st.day_str = today
+            st.runtime_hours_today = 0.0
+            st.thermal_kwh_today = 0.0
+            st.input_kwh_today = 0.0
+            st.fuel_consumed_today = 0.0
+            st.cost_today = 0.0
+
+        if mode == "refill":
+            current_remaining = max(0.0, (st.fuel_loaded_kg or 0.0) - st.fuel_since_refill_kg)
+            new_loaded = min(plant.hopper_capacity_kg * 2.0, current_remaining + kg)
+            st.fuel_loaded_kg = new_loaded
+            st.fuel_since_refill_kg = 0.0
+            st.last_refill_ts = now
+            self._throttler.clear(f"refill_{plant_id}")
+            dismiss_notification(self.hass, f"{NOTIF_PLANT_PREFIX}{plant_id}_refill")
+            self.state_dirty = True
+            return True
+
+        # mode == "burned": calculate energy & cost directly from kg of fuel
+        chem_kwh_per_kg = mj_kg_to_kwh_kg(plant.calorific_value_mj_kg)
+        eff = max(0.05, plant.efficiency_pct / 100.0)
+        d_in_kwh = kg * chem_kwh_per_kg
+        d_th_kwh = d_in_kwh * eff
+        price_per_unit = plant.fuel_price / 1000.0 if plant.fuel_price > 20.0 else plant.fuel_price
+        d_cost = kg * price_per_unit
+
+        st.fuel_consumed_today += kg
+        st.fuel_consumed_total += kg
+        st.input_kwh_today += d_in_kwh
+        st.input_kwh_total += d_in_kwh
+        st.thermal_kwh_today += d_th_kwh
+        st.thermal_kwh_total += d_th_kwh
+        st.cost_today += d_cost
+        st.cost_total += d_cost
+        st.fuel_since_refill_kg += kg
+        st.fuel_since_ash_clean_kg += kg
+        st.fuel_since_chimney_clean_kg += kg
+        self.state_dirty = True
+        return True
+
+    def confirm_maintenance(
+        self,
+        plant_id: str,
+        action: str,
+        kg: float | None = None,
+    ) -> bool:
+        """Mark maintenance completed: 'refill', 'ash_cleaned', or 'chimney_cleaned'."""
+        if plant_id not in self._plants:
+            return False
+        plant = self._plants[plant_id]
+        st = self._states.setdefault(plant_id, HeatPlantRuntimeState())
+        now = time.time()
+
+        if action == "refill":
+            amount = kg if (kg is not None and kg > 0) else plant.hopper_capacity_kg
+            st.fuel_loaded_kg = amount
+            st.fuel_since_refill_kg = 0.0
+            st.last_refill_ts = now
+            self._throttler.clear(f"refill_{plant_id}")
+            dismiss_notification(self.hass, f"{NOTIF_PLANT_PREFIX}{plant_id}_refill")
+        elif action == "ash_cleaned":
+            st.fuel_since_ash_clean_kg = 0.0
+            st.last_ash_clean_ts = now
+            self._throttler.clear(f"ash_{plant_id}")
+            dismiss_notification(self.hass, f"{NOTIF_PLANT_PREFIX}{plant_id}_ash")
+        elif action == "chimney_cleaned":
+            st.fuel_since_chimney_clean_kg = 0.0
+            st.last_chimney_clean_ts = now
+            self._throttler.clear(f"chimney_{plant_id}")
+            dismiss_notification(self.hass, f"{NOTIF_PLANT_PREFIX}{plant_id}_chimney")
+        else:
+            return False
+
+        self.state_dirty = True
+        return True
 
     def _read_temp_celsius(self, entity_id: str, label: str) -> float | None:
         if not entity_id:
@@ -365,6 +607,7 @@ class HeatPlantManager:
         plant: HeatPlantConfig,
         rooms: dict[str, dict],
         room_states: dict[str, dict],
+        suppressed_rooms: set[str] | None = None,
     ) -> tuple[list[str], list[str], float, float]:
         """Collect demanding rooms and active assigned devices for a heat plant.
 
@@ -372,6 +615,7 @@ class HeatPlantManager:
         """
         assigned_devs = set(plant.assigned_devices)
         assigned_rms = set(plant.assigned_rooms)
+        suppressed = suppressed_rooms or set()
 
         demanding_rooms: list[str] = []
         active_devices: list[str] = []
@@ -385,22 +629,20 @@ class HeatPlantManager:
                 if eid:
                     dev_to_room[eid] = area_id
 
-        checked_rooms: set[str] = set()
         for area_id, room in rooms.items():
             if room.get("is_outdoor", False):
+                continue
+            if area_id in suppressed:
                 continue
             room_devs = {d.get("entity_id", "") for d in room.get("devices", []) if d.get("entity_id")}
             matching_devs = room_devs & assigned_devs
             room_assigned = area_id in assigned_rms or bool(matching_devs)
             if not room_assigned:
                 continue
-            checked_rooms.add(area_id)
             rs = room_states.get(area_id) or {}
             mode = rs.get("commanded_mode", rs.get("mode", "idle"))
-            # Check if heat source orchestration excluded primary/secondary
             active_sources = rs.get("active_heat_sources")
             if mode == MODE_HEATING:
-                # Filter devices that actually run
                 running_in_room: list[str] = []
                 for dev in room.get("devices", []):
                     eid = dev.get("entity_id", "")
@@ -464,13 +706,25 @@ class HeatPlantManager:
         self,
         plant: HeatPlantConfig,
         active_demand: bool,
+        *,
+        overheat_protect: bool = False,
     ) -> None:
+        """Command the heat source entity while respecting non-extinguishable fire-hold safety."""
         eid = plant.source_entity
         if not eid:
             return
         domain = eid.split(".", 1)[0]
+
         if domain in ("switch", "input_boolean", "fan"):
-            await self._async_set_switch_like(eid, active_demand)
+            if active_demand:
+                await self._async_set_switch_like(eid, True)
+            elif overheat_protect:
+                # Emergency overheat: cut blower/feeder switch to prevent boiling while pump dumps heat
+                await self._async_set_switch_like(eid, False)
+            elif not plant.cannot_extinguish:
+                # Only switch off sources that CAN be completely extinguished (gas/electric/HP)
+                await self._async_set_switch_like(eid, False)
+            # When cannot_extinguish is True and normal idle: keep switch untouched (podtrzymanie ognia)
             return
 
         st = self.hass.states.get(eid)
@@ -491,7 +745,9 @@ class HeatPlantManager:
                         context=make_roommind_context(),
                     )
                 except Exception:  # noqa: BLE001
-                    _LOGGER.warning("Heat plant '%s': water_heater.set_temperature failed", plant.name, exc_info=True)
+                    _LOGGER.warning(
+                        "Heat plant '%s': water_heater.set_temperature failed", plant.name, exc_info=True
+                    )
             return
 
         if domain == "climate":
@@ -509,7 +765,9 @@ class HeatPlantManager:
                             context=make_roommind_context(),
                         )
                     except Exception:  # noqa: BLE001
-                        _LOGGER.warning("Heat plant '%s': climate.set_hvac_mode failed", plant.name, exc_info=True)
+                        _LOGGER.warning(
+                            "Heat plant '%s': climate.set_hvac_mode failed", plant.name, exc_info=True
+                        )
                 cur_sp = st.attributes.get("temperature")
                 if cur_sp is None or abs(float(cur_sp) - target_ha) > 0.5:
                     try:
@@ -521,9 +779,25 @@ class HeatPlantManager:
                             context=make_roommind_context(),
                         )
                     except Exception:  # noqa: BLE001
-                        _LOGGER.warning("Heat plant '%s': climate.set_temperature failed", plant.name, exc_info=True)
+                        _LOGGER.warning(
+                            "Heat plant '%s': climate.set_temperature failed", plant.name, exc_info=True
+                        )
             else:
-                if plant.off_mode == "temperature" and "heat" in modes:
+                # Non-extinguishable sources NEVER enter hvac_mode="off": they hold at idle_supply_temp!
+                use_temp_hold = plant.cannot_extinguish or plant.off_mode == "temperature"
+                if use_temp_hold and ("heat" in modes or "auto" in modes):
+                    hold_mode = "heat" if "heat" in modes else "auto"
+                    if plant.cannot_extinguish and st.state == "off" and hold_mode in modes:
+                        try:
+                            await self.hass.services.async_call(
+                                "climate",
+                                "set_hvac_mode",
+                                {"entity_id": eid, "hvac_mode": hold_mode},
+                                blocking=True,
+                                context=make_roommind_context(),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     idle_ha = celsius_to_ha_temp(self.hass, plant.idle_supply_temp)
                     cur_sp = st.attributes.get("temperature")
                     if cur_sp is None or abs(float(cur_sp) - idle_ha) > 0.5:
@@ -537,7 +811,7 @@ class HeatPlantManager:
                             )
                         except Exception:  # noqa: BLE001
                             pass
-                elif "off" in modes and st.state != "off":
+                elif not plant.cannot_extinguish and "off" in modes and st.state != "off":
                     try:
                         await self.hass.services.async_call(
                             "climate",
@@ -547,18 +821,21 @@ class HeatPlantManager:
                             context=make_roommind_context(),
                         )
                     except Exception:  # noqa: BLE001
-                        _LOGGER.warning("Heat plant '%s': climate.set_hvac_mode off failed", plant.name, exc_info=True)
+                        _LOGGER.warning(
+                            "Heat plant '%s': climate.set_hvac_mode off failed", plant.name, exc_info=True
+                        )
 
     def _compute_rates_and_accumulate(
         self,
         plant: HeatPlantConfig,
         st: HeatPlantRuntimeState,
         is_running: bool,
+        in_fire_hold: bool,
         effective_pf: float,
         now: float,
         dynamic_elec_price: float | None,
     ) -> dict[str, Any]:
-        """Compute instantaneous burn/power/cost rates and update daily/total counters."""
+        """Compute instantaneous burn/power/cost rates and update daily/total/maintenance counters."""
         today = dt_util.now().date().isoformat()
         if st.day_str != today:
             st.day_str = today
@@ -574,7 +851,7 @@ class HeatPlantManager:
             dt_hours = (now - st.last_ts) / 3600.0
         st.last_ts = now
 
-        # Check external energy_sensor (can be power in W/kW or cumulative energy in kWh)
+        # 1. Check external energy_sensor (can be power in W/kW or cumulative energy in kWh)
         sensor_power_kw: float | None = None
         sensor_energy_delta_kwh: float | None = None
         if plant.energy_sensor:
@@ -585,20 +862,49 @@ class HeatPlantManager:
                 if unit in ("W", "kW"):
                     sensor_power_kw = e_val / 1000.0 if unit == "W" else e_val
                 else:
-                    if st.last_energy_reading is not None and e_val >= st.last_energy_reading:
-                        sensor_energy_delta_kwh = e_val - st.last_energy_reading
+                    if st.last_energy_reading is not None:
+                        if e_val >= st.last_energy_reading:
+                            sensor_energy_delta_kwh = e_val - st.last_energy_reading
+                        elif e_val >= 0:
+                            # Sensor reset (e.g. daily utility meter)
+                            sensor_energy_delta_kwh = e_val
                     st.last_energy_reading = e_val
 
-        # Check external fuel_consumption_sensor (cumulative kg or m³)
+        # 2. Check external fuel_consumption_sensor (cumulative kg, g, or m³)
         sensor_fuel_delta: float | None = None
         if plant.fuel_consumption_sensor:
             f_val = read_sensor_value(self.hass, plant.fuel_consumption_sensor, plant.id, "fuel")
+            f_state = self.hass.states.get(plant.fuel_consumption_sensor)
+            f_unit = str(f_state.attributes.get("unit_of_measurement") or "").strip().lower() if f_state else ""
             if f_val is not None:
-                if st.last_fuel_reading is not None and f_val >= st.last_fuel_reading:
-                    sensor_fuel_delta = f_val - st.last_fuel_reading
+                if f_unit == "g":
+                    f_val = f_val / 1000.0
+                if st.last_fuel_reading is not None:
+                    if f_val >= st.last_fuel_reading:
+                        sensor_fuel_delta = f_val - st.last_fuel_reading
+                    elif f_val >= 0:
+                        # Daily-resetting kg counter
+                        sensor_fuel_delta = f_val
                 st.last_fuel_reading = f_val
 
-        pf = effective_pf if is_running else 0.0
+        # 3. Check auger / feeder screw entity (podajnik ślimakowy)
+        feeder_active = False
+        feeder_fuel_delta: float | None = None
+        if plant.feeder_entity:
+            feeder_st = self.hass.states.get(plant.feeder_entity)
+            if feeder_st is not None and feeder_st.state == "on":
+                feeder_active = True
+                if dt_hours > 0:
+                    feeder_fuel_delta = plant.feeder_kg_per_hour * dt_hours
+
+        # Effective power fraction: when in fire-hold (podtrzymanie), solid-fuel boiler burns at min_power_pct
+        if is_running:
+            pf = effective_pf
+        elif in_fire_hold and plant.cannot_extinguish and plant.min_power_pct > 0:
+            pf = plant.min_power_pct / 100.0
+        else:
+            pf = 0.0
+
         eff = max(0.05, plant.efficiency_pct / 100.0)
         cop = max(1.0, plant.cop)
 
@@ -606,7 +912,11 @@ class HeatPlantManager:
         chem_kwh_per_kg = mj_kg_to_kwh_kg(plant.calorific_value_mj_kg)
         usable_kwh_kg = usable_kwh_per_kg(plant.calorific_value_mj_kg, plant.efficiency_pct)
 
-        if plant.plant_type == PLANT_TYPE_HEAT_PUMP:
+        if feeder_active and plant.fuel_type in SOLID_FUEL_TYPES and chem_kwh_per_kg > 0:
+            burn_rate_per_h = plant.feeder_kg_per_hour
+            current_input_kw = burn_rate_per_h * chem_kwh_per_kg
+            current_thermal_kw = current_input_kw * eff
+        elif plant.plant_type == PLANT_TYPE_HEAT_PUMP:
             if sensor_power_kw is not None:
                 current_input_kw = sensor_power_kw
                 current_thermal_kw = current_input_kw * cop
@@ -626,9 +936,10 @@ class HeatPlantManager:
                 current_input_kw = current_thermal_kw / eff
 
         # Fuel burn rate & unit price
-        if plant.fuel_type in (FUEL_TYPE_COAL, FUEL_TYPE_PELLET, FUEL_TYPE_WOOD):
+        if plant.fuel_type in SOLID_FUEL_TYPES:
             fuel_unit = "kg"
-            burn_rate_per_h = current_input_kw / chem_kwh_per_kg if chem_kwh_per_kg > 0 else 0.0
+            if not feeder_active:
+                burn_rate_per_h = current_input_kw / chem_kwh_per_kg if chem_kwh_per_kg > 0 else 0.0
             # fuel_price is per ton (1000 kg) if > 20, or per kg if <= 20
             price_per_unit = plant.fuel_price / 1000.0 if plant.fuel_price > 20.0 else plant.fuel_price
         elif plant.fuel_type == FUEL_TYPE_GAS:
@@ -651,7 +962,7 @@ class HeatPlantManager:
         cost_per_hour = burn_rate_per_h * price_per_unit
         if current_thermal_kw > 1e-6:
             cost_per_kwh_thermal = cost_per_hour / current_thermal_kw
-        elif plant.fuel_type in (FUEL_TYPE_COAL, FUEL_TYPE_PELLET, FUEL_TYPE_WOOD) and usable_kwh_kg > 0:
+        elif plant.fuel_type in SOLID_FUEL_TYPES and usable_kwh_kg > 0:
             cost_per_kwh_thermal = price_per_unit / usable_kwh_kg
         elif plant.fuel_type == FUEL_TYPE_GAS and plant.calorific_value_kwh_m3 > 0:
             cost_per_kwh_thermal = price_per_unit / (plant.calorific_value_kwh_m3 * eff)
@@ -660,8 +971,16 @@ class HeatPlantManager:
         else:
             cost_per_kwh_thermal = price_per_unit / eff
 
-        if dt_hours > 0:
-            if is_running:
+        fuel_source_mode = "estimated"
+        if plant.fuel_consumption_sensor:
+            fuel_source_mode = "fuel_sensor"
+        elif plant.feeder_entity:
+            fuel_source_mode = "feeder"
+        elif plant.energy_sensor:
+            fuel_source_mode = "energy_sensor"
+
+        if dt_hours > 0 or sensor_fuel_delta is not None or sensor_energy_delta_kwh is not None:
+            if is_running and dt_hours > 0:
                 st.runtime_hours_today += dt_hours
                 st.runtime_hours_total += dt_hours
 
@@ -677,12 +996,22 @@ class HeatPlantManager:
             )
             if sensor_fuel_delta is not None:
                 d_fuel = sensor_fuel_delta
-                if plant.fuel_type in (FUEL_TYPE_COAL, FUEL_TYPE_PELLET, FUEL_TYPE_WOOD):
+                if plant.fuel_type in SOLID_FUEL_TYPES:
                     d_in_kwh = d_fuel * chem_kwh_per_kg
                     d_th_kwh = d_in_kwh * eff
                 elif plant.fuel_type == FUEL_TYPE_GAS:
                     d_in_kwh = d_fuel * plant.calorific_value_kwh_m3
                     d_th_kwh = d_in_kwh * eff
+            elif feeder_fuel_delta is not None:
+                d_fuel = feeder_fuel_delta
+                if plant.fuel_type in SOLID_FUEL_TYPES:
+                    d_in_kwh = d_fuel * chem_kwh_per_kg
+                    d_th_kwh = d_in_kwh * eff
+            elif plant.feeder_entity:
+                # Feeder entity configured but currently off: 0 kg fed this cycle
+                d_fuel = 0.0
+                d_in_kwh = 0.0
+                d_th_kwh = 0.0
             else:
                 d_fuel = burn_rate_per_h * dt_hours
 
@@ -696,10 +1025,16 @@ class HeatPlantManager:
                 st.fuel_consumed_total += d_fuel
                 st.cost_today += d_cost
                 st.cost_total += d_cost
+                if plant.fuel_type in SOLID_FUEL_TYPES and d_fuel > 0:
+                    st.fuel_since_refill_kg += d_fuel
+                    st.fuel_since_ash_clean_kg += d_fuel
+                    st.fuel_since_chimney_clean_kg += d_fuel
                 self.state_dirty = True
 
         return {
             "fuel_unit": fuel_unit,
+            "fuel_source_mode": fuel_source_mode,
+            "feeder_active": feeder_active,
             "chemical_kwh_per_kg": round(chem_kwh_per_kg, 2),
             "usable_kwh_per_kg": round(usable_kwh_kg, 2),
             "current_thermal_kw": round(current_thermal_kw, 2),
@@ -719,6 +1054,215 @@ class HeatPlantManager:
             "cost_total": round(st.cost_total, 2),
         }
 
+    async def _evaluate_maintenance_and_notify(
+        self,
+        plant: HeatPlantConfig,
+        st: HeatPlantRuntimeState,
+        burn_rate_per_h: float,
+        now: float,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compute hopper level, ash accumulation, chimney wear, and send throttled notifications."""
+        is_solid = plant.fuel_type in SOLID_FUEL_TYPES
+        if not is_solid:
+            return {
+                "fuel_remaining_kg": None,
+                "hopper_pct": None,
+                "hours_until_refill": None,
+                "fuel_since_refill_kg": 0.0,
+                "fuel_since_ash_clean_kg": 0.0,
+                "estimated_ash_kg": 0.0,
+                "ash_fill_pct": 0.0,
+                "days_since_ash_clean": 0.0,
+                "fuel_since_chimney_clean_kg": 0.0,
+                "chimney_wear_pct": 0.0,
+                "days_since_chimney_clean": 0.0,
+                "refill_needed": False,
+                "ash_clean_needed": False,
+                "chimney_clean_needed": False,
+                "maintenance_alerts": [],
+            }
+
+        # Hopper remaining kg & %
+        loaded = st.fuel_loaded_kg if st.fuel_loaded_kg is not None else plant.hopper_capacity_kg
+        fuel_remaining_kg = max(0.0, loaded - st.fuel_since_refill_kg)
+        hopper_pct = (
+            max(0.0, min(100.0, (fuel_remaining_kg / plant.hopper_capacity_kg) * 100.0))
+            if plant.hopper_capacity_kg > 0
+            else 0.0
+        )
+
+        # Optional HA hopper level sensor overrides calculated remaining level
+        if plant.hopper_level_sensor:
+            h_val = read_sensor_value(self.hass, plant.hopper_level_sensor, plant.id, "hopper level")
+            h_state = self.hass.states.get(plant.hopper_level_sensor)
+            h_unit = str(h_state.attributes.get("unit_of_measurement") or "").strip().lower() if h_state else ""
+            if h_val is not None:
+                if h_unit == "%":
+                    hopper_pct = max(0.0, min(100.0, h_val))
+                    fuel_remaining_kg = (hopper_pct / 100.0) * plant.hopper_capacity_kg
+                else:
+                    fuel_remaining_kg = max(0.0, h_val)
+                    hopper_pct = (
+                        max(0.0, min(100.0, (fuel_remaining_kg / plant.hopper_capacity_kg) * 100.0))
+                        if plant.hopper_capacity_kg > 0
+                        else 0.0
+                    )
+
+        hours_until_refill: float | None = None
+        if burn_rate_per_h > 0.05:
+            hours_until_refill = round(fuel_remaining_kg / burn_rate_per_h, 1)
+
+        # Ash accumulation
+        estimated_ash_kg = st.fuel_since_ash_clean_kg * (plant.ash_content_pct / 100.0)
+        days_since_ash = (now - st.last_ash_clean_ts) / 86400.0 if st.last_ash_clean_ts else 0.0
+        ash_kg_pct = (
+            (st.fuel_since_ash_clean_kg / plant.ash_clean_interval_kg) * 100.0
+            if plant.ash_clean_interval_kg > 0
+            else 0.0
+        )
+        ash_days_pct = (
+            (days_since_ash / plant.ash_clean_interval_days) * 100.0
+            if plant.ash_clean_interval_days > 0
+            else 0.0
+        )
+        ash_fill_pct = min(150.0, max(ash_kg_pct, ash_days_pct))
+
+        # Chimney wear
+        days_since_chimney = (now - st.last_chimney_clean_ts) / 86400.0 if st.last_chimney_clean_ts else 0.0
+        chimney_kg_pct = (
+            (st.fuel_since_chimney_clean_kg / plant.chimney_clean_interval_kg) * 100.0
+            if plant.chimney_clean_interval_kg > 0
+            else 0.0
+        )
+        chimney_days_pct = (
+            (days_since_chimney / plant.chimney_clean_interval_days) * 100.0
+            if plant.chimney_clean_interval_days > 0
+            else 0.0
+        )
+        chimney_wear_pct = min(150.0, max(chimney_kg_pct, chimney_days_pct))
+
+        refill_needed = bool(
+            (plant.refill_alert_kg > 0 and fuel_remaining_kg <= plant.refill_alert_kg)
+            or (plant.refill_alert_pct > 0 and hopper_pct <= plant.refill_alert_pct)
+        )
+        ash_clean_needed = bool(
+            (plant.ash_clean_interval_kg > 0 and st.fuel_since_ash_clean_kg >= plant.ash_clean_interval_kg)
+            or (plant.ash_clean_interval_days > 0 and days_since_ash >= plant.ash_clean_interval_days)
+        )
+        chimney_clean_needed = bool(
+            (
+                plant.chimney_clean_interval_kg > 0
+                and st.fuel_since_chimney_clean_kg >= plant.chimney_clean_interval_kg
+            )
+            or (plant.chimney_clean_interval_days > 0 and days_since_chimney >= plant.chimney_clean_interval_days)
+        )
+
+        alerts: list[str] = []
+        if refill_needed:
+            alerts.append("refill")
+        if ash_clean_needed:
+            alerts.append("ash")
+        if chimney_clean_needed:
+            alerts.append("chimney")
+
+        # Send throttled HA notifications when enabled
+        global_notify = settings.get("heat_plant_notifications_enabled", True)
+        targets = settings.get("heat_plant_notification_targets") or settings.get("mold_notification_targets", [])
+        cooldown_s = (
+            float(
+                settings.get(
+                    "heat_plant_notification_cooldown",
+                    DEFAULT_HEAT_PLANT_NOTIFICATION_COOLDOWN_MINUTES,
+                )
+            )
+            * 60.0
+        )
+
+        if global_notify:
+            plant_label = plant.name or plant.id
+            await self._dispatch_maintenance_alert(
+                key=f"refill_{plant.id}",
+                notif_id=f"{NOTIF_PLANT_PREFIX}{plant.id}_refill",
+                active=refill_needed and plant.notify_refill_enabled,
+                cooldown_s=cooldown_s,
+                targets=targets,
+                title=f"RoomMind: Dołóż opału — {plant_label}",
+                message=(
+                    f"{plant_label}: niski poziom opału — pozostało ok. {fuel_remaining_kg:.1f} kg "
+                    f"({hopper_pct:.0f}%). Spalono od ostatniego zasypu: {st.fuel_since_refill_kg:.1f} kg."
+                ),
+            )
+            await self._dispatch_maintenance_alert(
+                key=f"ash_{plant.id}",
+                notif_id=f"{NOTIF_PLANT_PREFIX}{plant.id}_ash",
+                active=ash_clean_needed and plant.notify_ash_enabled,
+                cooldown_s=cooldown_s,
+                targets=targets,
+                title=f"RoomMind: Opróżnij popielnik — {plant_label}",
+                message=(
+                    f"{plant_label}: czas posprzątać zbiornik na popiół. Spalono {st.fuel_since_ash_clean_kg:.1f} kg "
+                    f"opału (~{estimated_ash_kg:.1f} kg popiołu, {days_since_ash:.0f} dni od ostatniego czyszczenia)."
+                ),
+            )
+            await self._dispatch_maintenance_alert(
+                key=f"chimney_{plant.id}",
+                notif_id=f"{NOTIF_PLANT_PREFIX}{plant.id}_chimney",
+                active=chimney_clean_needed and plant.notify_chimney_enabled,
+                cooldown_s=cooldown_s,
+                targets=targets,
+                title=f"RoomMind: Czyszczenie komina — {plant_label}",
+                message=(
+                    f"{plant_label}: zalecane czyszczenie komina. Spalono {st.fuel_since_chimney_clean_kg:.0f} kg "
+                    f"opału ({days_since_chimney:.0f} dni od ostatniego czyszczenia)."
+                ),
+            )
+
+        return {
+            "fuel_remaining_kg": round(fuel_remaining_kg, 1),
+            "hopper_pct": round(hopper_pct, 1),
+            "hours_until_refill": hours_until_refill,
+            "fuel_since_refill_kg": round(st.fuel_since_refill_kg, 2),
+            "fuel_since_ash_clean_kg": round(st.fuel_since_ash_clean_kg, 2),
+            "estimated_ash_kg": round(estimated_ash_kg, 2),
+            "ash_fill_pct": round(min(100.0, ash_fill_pct), 1),
+            "days_since_ash_clean": round(days_since_ash, 1),
+            "fuel_since_chimney_clean_kg": round(st.fuel_since_chimney_clean_kg, 1),
+            "chimney_wear_pct": round(min(100.0, chimney_wear_pct), 1),
+            "days_since_chimney_clean": round(days_since_chimney, 1),
+            "refill_needed": refill_needed,
+            "ash_clean_needed": ash_clean_needed,
+            "chimney_clean_needed": chimney_clean_needed,
+            "maintenance_alerts": alerts,
+        }
+
+    async def _dispatch_maintenance_alert(
+        self,
+        *,
+        key: str,
+        notif_id: str,
+        active: bool,
+        cooldown_s: float,
+        targets: list[dict],
+        title: str,
+        message: str,
+    ) -> None:
+        if active:
+            if self._throttler.should_send(key, cooldown_s):
+                await async_send_notification(
+                    self.hass,
+                    notification_id=notif_id,
+                    targets=targets,
+                    message=message,
+                    title=title,
+                    tag=notif_id,
+                )
+                self._throttler.record_sent(key)
+        else:
+            if key in self._throttler._last_sent:
+                self._throttler.clear(key)
+                dismiss_notification(self.hass, notif_id)
+
     async def async_process(
         self,
         rooms: dict[str, dict],
@@ -726,13 +1270,31 @@ class HeatPlantManager:
         settings: dict[str, Any],
         dynamic_elec_price: float | None = None,
     ) -> dict[str, dict[str, Any]]:
-        """Evaluate all configured heat plants, command sources/pumps, and update telemetry."""
+        """Evaluate all configured heat plants, coordinate multi-source priority, command sources/pumps."""
         self.load_configs(settings.get("heat_plants", []))
         climate_active = bool(settings.get("climate_control_active", True))
         now = time.time()
         live_out: dict[str, dict[str, Any]] = {}
 
-        for pid, plant in self._plants.items():
+        # Sort plants by priority (1 = highest priority, e.g. fireplace before backup boiler)
+        ordered_plants = sorted(self._plants.values(), key=lambda p: (p.priority, p.id))
+
+        # Pre-pass: detect child loops (e.g. underfloor manifold) demanding heat from a parent plant
+        parent_extra_demand: dict[str, list[str]] = {}
+        for plant in ordered_plants:
+            if not plant.enabled or not plant.parent_plant_id or plant.parent_plant_id not in self._plants:
+                continue
+            d_rooms, a_devs, _, _ = self._collect_demand(plant, rooms, room_states)
+            if len(d_rooms) >= plant.min_rooms_demand or (
+                not plant.assigned_rooms and len(a_devs) >= plant.min_rooms_demand
+            ):
+                parent_extra_demand.setdefault(plant.parent_plant_id, []).append(plant.name or plant.id)
+
+        # Track rooms already actively warmed by a higher-priority heat source (e.g. fireplace)
+        covered_rooms_by_higher_priority: dict[str, str] = {}
+
+        for plant in ordered_plants:
+            pid = plant.id
             st = self._states.setdefault(pid, HeatPlantRuntimeState())
             supply_temp = self._read_temp_celsius(plant.supply_temp_sensor, "supply temperature")
             return_temp = self._read_temp_celsius(plant.return_temp_sensor, "return temperature")
@@ -745,13 +1307,36 @@ class HeatPlantManager:
                 else None
             )
 
-            demanding_rooms, active_devices, mean_pf, max_pf = self._collect_demand(
-                plant, rooms, room_states
+            # Check if higher-priority sources (with strictly smaller priority number) already cover rooms
+            suppressed_rooms = {
+                aid
+                for aid, src_pid in covered_rooms_by_higher_priority.items()
+                if self._plants[src_pid].priority < plant.priority
+            }
+            assisted_by = sorted(
+                {
+                    self._plants[covered_rooms_by_higher_priority[aid]].name or covered_rooms_by_higher_priority[aid]
+                    for aid in suppressed_rooms
+                    if aid in plant.assigned_rooms
+                    or any(
+                        d.get("entity_id") in plant.assigned_devices
+                        for d in (rooms.get(aid) or {}).get("devices", [])
+                    )
+                }
             )
+
+            demanding_rooms, active_devices, mean_pf, max_pf = self._collect_demand(
+                plant, rooms, room_states, suppressed_rooms=suppressed_rooms
+            )
+            child_demands = parent_extra_demand.get(pid, [])
             heating_demand = (
                 len(demanding_rooms) >= plant.min_rooms_demand
                 or (not plant.assigned_rooms and len(active_devices) >= plant.min_rooms_demand)
+                or bool(child_demands)
             )
+            if child_demands and mean_pf <= 0:
+                mean_pf = 0.6
+                max_pf = max(max_pf, 0.6)
 
             # Evaluate DHW (CWU) demand with hysteresis
             if plant.dhw_temp_sensor and dhw_temp is not None and math.isfinite(dhw_temp):
@@ -764,37 +1349,93 @@ class HeatPlantManager:
 
             dhw_demand = st.dhw_charging and bool(plant.dhw_pump_entity or plant.dhw_temp_sensor)
 
-            # Overheat protection: boiler supply temp exceeds safety threshold
+            # Overheat protection:
+            # - Boilers / fireplaces: supply >= ch_pump_overrun_temp (default 80°C) -> force C.O. & DHW dump pumps ON
+            # - Underfloor manifold: supply >= ch_pump_overrun_temp (default 48°C) -> STOP UFH pump to protect floor!
             overheat_protect = (
                 supply_temp is not None
                 and plant.ch_pump_overrun_temp > 0
                 and supply_temp >= plant.ch_pump_overrun_temp
             )
 
-            # C.O. pump logic: run when overheat_protect OR (heating_demand and supply warm enough)
+            # C.O. / UFH pump logic
             supply_warm_for_ch = (
                 supply_temp is None
                 or plant.ch_pump_min_supply_temp <= 0
                 or supply_temp >= plant.ch_pump_min_supply_temp
             )
-            ch_pump_wanted = overheat_protect or (plant.enabled and heating_demand and supply_warm_for_ch)
+            if plant.plant_type == PLANT_TYPE_UNDERFLOOR:
+                ch_pump_wanted = (
+                    not overheat_protect and plant.enabled and heating_demand and supply_warm_for_ch
+                )
+            else:
+                ch_pump_wanted = overheat_protect or (
+                    plant.enabled and heating_demand and supply_warm_for_ch
+                )
 
-            # CWU pump logic: run when dhw_demand and supply is warmer than DHW tank + delta
+            # CWU pump logic: run when (dhw_demand and supply warmer than DHW + delta) OR emergency heat dump
             supply_warm_for_dhw = (
                 supply_temp is None
                 or dhw_temp is None
                 or supply_temp >= dhw_temp + plant.dhw_min_supply_delta
             )
-            dhw_pump_wanted = plant.enabled and dhw_demand and supply_warm_for_dhw
+            dhw_overheat_dump = (
+                overheat_protect
+                and plant.plant_type != PLANT_TYPE_UNDERFLOOR
+                and (dhw_temp is None or dhw_temp < 70.0)
+            )
+            dhw_pump_wanted = (plant.enabled and dhw_demand and supply_warm_for_dhw) or dhw_overheat_dump
+
+            # Low return temperature warning for solid-fuel boilers (corrosion / creosote risk)
+            low_return_warning = bool(
+                plant.plant_type in (PLANT_TYPE_COAL_BOILER, PLANT_TYPE_PELLET_BOILER, PLANT_TYPE_WOOD_BOILER)
+                and supply_temp is not None
+                and supply_temp >= 50.0
+                and return_temp is not None
+                and return_temp < 45.0
+            )
 
             source_wanted = plant.enabled and (heating_demand or dhw_demand) and not overheat_protect
 
             if climate_active and plant.enabled:
-                await self._async_control_source(plant, source_wanted)
+                await self._async_control_source(
+                    plant, source_wanted, overheat_protect=overheat_protect
+                )
                 if plant.ch_pump_entity:
                     await self._async_set_switch_like(plant.ch_pump_entity, ch_pump_wanted)
                 if plant.dhw_pump_entity:
                     await self._async_set_switch_like(plant.dhw_pump_entity, dhw_pump_wanted)
+
+            # Immediate HA notification on overheat (short 10-min safety cooldown)
+            if settings.get("heat_plant_notifications_enabled", True):
+                overheat_targets = settings.get("heat_plant_notification_targets") or settings.get(
+                    "mold_notification_targets", []
+                )
+                plant_label = plant.name or plant.id
+                if plant.plant_type == PLANT_TYPE_UNDERFLOOR:
+                    overheat_msg = (
+                        f"{plant_label}: zbyt wysoka temperatura zasilania podłogówki "
+                        f"({supply_temp:.1f}°C >= {plant.ch_pump_overrun_temp:.0f}°C)! "
+                        "Pompa podłogówki została awaryjnie zatrzymana."
+                        if supply_temp is not None
+                        else f"{plant_label}: alarm przegrzania podłogówki!"
+                    )
+                else:
+                    overheat_msg = (
+                        f"{plant_label}: przegrzanie kotła/źródła ({supply_temp:.1f}°C >= "
+                        f"{plant.ch_pump_overrun_temp:.0f}°C)! Wymuszono zrzut ciepła pompami C.O."
+                        if supply_temp is not None
+                        else f"{plant_label}: alarm przegrzania kotła!"
+                    )
+                await self._dispatch_maintenance_alert(
+                    key=f"overheat_{pid}",
+                    notif_id=f"{NOTIF_PLANT_PREFIX}{pid}_overheat",
+                    active=overheat_protect,
+                    cooldown_s=600.0,
+                    targets=overheat_targets,
+                    title=f"RoomMind: ALARM PRZEGRZANIA — {plant_label}",
+                    message=overheat_msg,
+                )
 
             # Read actual states of source and pumps
             ch_pump_state = self.hass.states.get(plant.ch_pump_entity) if plant.ch_pump_entity else None
@@ -821,13 +1462,36 @@ class HeatPlantManager:
                 else:
                     source_active = s_st not in ("off", "unavailable", "unknown", "idle")
             else:
-                # Without a controllable source entity (e.g. manual coal boiler), infer active
-                # from heating/DHW demand or high supply temperature
-                source_active = source_wanted or (
+                # Without a controllable source entity (e.g. manual coal boiler or fireplace),
+                # infer active from heating/DHW demand, warm supply temp, or hot flue temp
+                source_active = (
+                    source_wanted
+                    or (
+                        supply_temp is not None
+                        and plant.ch_pump_min_supply_temp > 0
+                        and supply_temp >= plant.ch_pump_min_supply_temp
+                    )
+                    or (flue_temp is not None and flue_temp >= 80.0)
+                )
+
+            # Determine if a non-extinguishable plant is currently in fire-hold (podtrzymanie ognia)
+            fire_alive = (
+                source_active
+                or (
                     supply_temp is not None
                     and plant.ch_pump_min_supply_temp > 0
-                    and supply_temp >= plant.ch_pump_min_supply_temp
+                    and supply_temp >= max(30.0, plant.ch_pump_min_supply_temp - 5.0)
                 )
+                or (flue_temp is not None and flue_temp >= 55.0)
+            )
+            in_fire_hold = (
+                plant.cannot_extinguish
+                and plant.enabled
+                and not overheat_protect
+                and not heating_demand
+                and not dhw_demand
+                and fire_alive
+            )
 
             if overheat_protect:
                 state_label = "overheat_protect"
@@ -837,28 +1501,62 @@ class HeatPlantManager:
                 state_label = "heating"
             elif dhw_demand:
                 state_label = "dhw"
+            elif in_fire_hold:
+                state_label = "hold"
             elif source_active:
                 state_label = "active"
             else:
                 state_label = "idle"
 
-            eff_pf = mean_pf if heating_demand else (1.0 if (dhw_demand or source_active) else 0.0)
+            # If this plant is actively heating (e.g. a fireplace burning hot), register covered rooms
+            # so lower-priority backup boilers can smoothly drop to fire-hold instead of fighting it
+            if (
+                plant.enabled
+                and (source_active or heating_demand)
+                and plant.plant_type != PLANT_TYPE_UNDERFLOOR
+                and (supply_temp is None or supply_temp >= plant.ch_pump_min_supply_temp or (flue_temp is not None and flue_temp >= 80.0))
+            ):
+                for aid in demanding_rooms:
+                    covered_rooms_by_higher_priority.setdefault(aid, pid)
+
+            eff_pf = (
+                mean_pf
+                if heating_demand
+                else (1.0 if dhw_demand else (plant.min_power_pct / 100.0 if in_fire_hold else (1.0 if source_active else 0.0)))
+            )
             metrics = self._compute_rates_and_accumulate(
                 plant=plant,
                 st=st,
-                is_running=source_active,
+                is_running=source_active and not in_fire_hold,
+                in_fire_hold=in_fire_hold,
                 effective_pf=eff_pf,
                 now=now,
                 dynamic_elec_price=dynamic_elec_price,
             )
+            maintenance = await self._evaluate_maintenance_and_notify(
+                plant=plant,
+                st=st,
+                burn_rate_per_h=float(metrics["burn_rate_per_h"]),
+                now=now,
+                settings=settings,
+            )
 
             live_out[pid] = {
                 "id": pid,
+                "name": plant.name,
+                "plant_type": plant.plant_type,
+                "cannot_extinguish": plant.cannot_extinguish,
+                "in_fire_hold": in_fire_hold,
+                "priority": plant.priority,
+                "parent_plant_id": plant.parent_plant_id,
+                "child_demands": child_demands,
+                "assisted_by": assisted_by,
                 "state": state_label,
                 "source_active": source_active,
                 "heating_demand": heating_demand,
                 "dhw_demand": dhw_demand,
                 "overheat_protect": overheat_protect,
+                "low_return_warning": low_return_warning,
                 "supply_temp": round(supply_temp, 1) if supply_temp is not None else None,
                 "return_temp": round(return_temp, 1) if return_temp is not None else None,
                 "delta_t": delta_t,
@@ -870,9 +1568,10 @@ class HeatPlantManager:
                 "dhw_pump_blocked_cold": bool(dhw_demand and not supply_warm_for_dhw),
                 "demanding_rooms": demanding_rooms,
                 "active_devices": active_devices,
-                "mean_power_pct": round(eff_pf * 100) if source_active else 0,
+                "mean_power_pct": round(eff_pf * 100) if (source_active or in_fire_hold) else 0,
                 "max_power_pct": round(max_pf * 100),
                 **metrics,
+                **maintenance,
             }
 
         self._live = live_out

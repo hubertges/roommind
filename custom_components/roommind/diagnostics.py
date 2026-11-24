@@ -22,6 +22,11 @@ HISTORY_48H_MAX_ROWS = 1000
 _ROOM_ENTITY_KEYS = (
     "temperature_sensor",
     "humidity_sensor",
+    "pm25_sensor",
+    "pm10_sensor",
+    "pm1_sensor",
+    "humidifier_entity",
+    "dehumidifier_entity",
     "schedule_selector_entity",
     "cover_schedule_selector_entity",
 )
@@ -459,4 +464,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
                 for pid in settings.get("presence_persons", [])
             },
         },
+        **(
+            {"heat_plants_live": coordinator.heat_plants_live}
+            if coordinator is not None and getattr(coordinator, "heat_plants_live", None)
+            else {}
+        ),
     }
