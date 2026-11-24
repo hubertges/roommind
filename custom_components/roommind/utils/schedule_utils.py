@@ -707,11 +707,17 @@ def room_configured_humidity_targets(
     if c_dehum is None:
         c_dehum = room.get("humidity_max")
 
-    e_hum = room.get("eco_humidify")
-    if e_hum is None and c_hum is not None:
+    # If "eco_humidify" is explicitly present as None (or <= 0), humidification is disabled in Eco/night!
+    if "eco_humidify" in room:
+        raw_eh = room.get("eco_humidify")
+        e_hum = float(raw_eh) if isinstance(raw_eh, (int, float)) and raw_eh > 0 else None
+    else:
         e_hum = c_hum
-    e_dehum = room.get("eco_dehumidify")
-    if e_dehum is None and c_dehum is not None:
+
+    if "eco_dehumidify" in room:
+        raw_ed = room.get("eco_dehumidify")
+        e_dehum = float(raw_ed) if isinstance(raw_ed, (int, float)) and raw_ed > 0 else None
+    else:
         e_dehum = c_dehum
 
     humidity_mode = room.get("humidity_mode", "auto")
@@ -827,6 +833,9 @@ def _schedule_humidity_targets_at_time(
         return TargetHumidities(humidify=comfort_humidify, dehumidify=comfort_dehumidify)
     data = find_active_block(schedule_blocks, ts)
     if data is not None:
+        if data.get("humidifier") is False or data.get("humidify_humidity") in (0, 0.0, False, "off"):
+            # Explicit block rule: humidifier disabled during this schedule block (e.g. night block)
+            return TargetHumidities(humidify=None, dehumidify=comfort_dehumidify)
         hum_raw = data.get("humidify_humidity")
         dehum_raw = data.get("dehumidify_humidity")
         if hum_raw is not None or dehum_raw is not None:

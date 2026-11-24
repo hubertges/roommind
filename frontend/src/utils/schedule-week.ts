@@ -325,6 +325,8 @@ export interface BlockTemps {
   cool?: number;
   /** Plain `temperature` key: one value for both sides. */
   single?: number;
+  /** Humidifier target in % RH for this block, or 0 when explicitly turned off in this block. */
+  humidify?: number;
 }
 
 function num(value: unknown): number | undefined {
@@ -337,10 +339,13 @@ function num(value: unknown): number | undefined {
 
 export function blockTemps(block: ScheduleBlock): BlockTemps {
   const data = block.data ?? {};
+  const rawHum = data.humidify_humidity;
+  const humOff = data.humidifier === false || rawHum === 0 || rawHum === "off";
   return {
     heat: num(data.heat_temperature),
     cool: num(data.cool_temperature),
     single: num(data.temperature),
+    humidify: humOff ? 0 : num(rawHum),
   };
 }
 
@@ -358,7 +363,7 @@ export function usesComfort(block: ScheduleBlock): boolean {
  */
 export function withTemps(
   data: BlockData | undefined,
-  temps: { heat?: number; cool?: number } | null,
+  temps: { heat?: number; cool?: number; humidify?: number | null } | null,
   sides: { heat: boolean; cool: boolean } = { heat: true, cool: true },
 ): BlockData | undefined {
   const next: BlockData = { ...(data ?? {}) };
@@ -377,6 +382,18 @@ export function withTemps(
     }
     if (temps.heat !== undefined) next.heat_temperature = temps.heat;
     if (temps.cool !== undefined) next.cool_temperature = temps.cool;
+    if ("humidify" in temps) {
+      if (temps.humidify == null) {
+        delete next.humidify_humidity;
+        delete next.humidifier;
+      } else if (temps.humidify <= 0) {
+        next.humidify_humidity = 0;
+        next.humidifier = false;
+      } else {
+        next.humidify_humidity = temps.humidify;
+        delete next.humidifier;
+      }
+    }
   }
   return Object.keys(next).length > 0 ? next : undefined;
 }

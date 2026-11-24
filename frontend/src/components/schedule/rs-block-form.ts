@@ -29,6 +29,7 @@ import "../shared/rs-number-field";
 export interface BlockTempChange {
   heat?: number;
   cool?: number;
+  humidify?: number | null;
 }
 
 /**
@@ -65,6 +66,8 @@ export class RsBlockForm extends LitElement {
   @state() private _own = false;
   @state() private _heat = 21;
   @state() private _cool = 24;
+  @state() private _humMode: "comfort" | "own" | "off" = "comfort";
+  @state() private _humidify = 45;
   @state() private _position: number = COVER_CLOSED;
 
   static styles = [
@@ -174,6 +177,16 @@ export class RsBlockForm extends LitElement {
     this._own = !usesComfort(this.block);
     this._heat = t.heat ?? t.single ?? this.defaults.heat;
     this._cool = t.cool ?? t.single ?? this.defaults.cool;
+    if (t.humidify === 0) {
+      this._humMode = "off";
+      this._humidify = 45;
+    } else if (t.humidify !== undefined) {
+      this._humMode = "own";
+      this._humidify = t.humidify;
+    } else {
+      this._humMode = "comfort";
+      this._humidify = 45;
+    }
     this._position = blockPosition(this.block) ?? COVER_CLOSED;
   }
 
@@ -232,19 +245,75 @@ export class RsBlockForm extends LitElement {
 
   private _renderTemperature() {
     const l = this.hass.language;
+    const isPl = (l ?? "pl").toLowerCase().startsWith("pl");
     return html`<div class="section">
-      <p class="section-title" id="temp-title">${localize("schedule_editor.temperature", l)}</p>
-      <rs-segmented
-        .label=${localize("schedule_editor.temperature", l)}
-        .options=${[
-          { value: "comfort", label: localize("override.comfort", l), icon: "mdi:sofa" },
-          { value: "own", label: localize("schedule_editor.own", l), icon: "mdi:thermometer" },
-        ]}
-        .value=${this._own ? "own" : "comfort"}
-        @value-changed=${this._onKind}
-      ></rs-segmented>
-      ${this._own ? this._renderOwn() : html`<p class="hint">${this._comfortHint()}</p>`}
-    </div>`;
+        <p class="section-title" id="temp-title">${localize("schedule_editor.temperature", l)}</p>
+        <rs-segmented
+          .label=${localize("schedule_editor.temperature", l)}
+          .options=${[
+            { value: "comfort", label: localize("override.comfort", l), icon: "mdi:sofa" },
+            { value: "own", label: localize("schedule_editor.own", l), icon: "mdi:thermometer" },
+          ]}
+          .value=${this._own ? "own" : "comfort"}
+          @value-changed=${this._onKind}
+        ></rs-segmented>
+        ${this._own ? this._renderOwn() : html`<p class="hint">${this._comfortHint()}</p>`}
+      </div>
+      <div class="section">
+        <p class="section-title">
+          ${isPl ? "Nawilżacz w tym przedziale godzin" : "Humidifier in this time block"}
+        </p>
+        <rs-segmented
+          .label=${isPl ? "Nawilżacz" : "Humidifier"}
+          .options=${[
+            {
+              value: "comfort",
+              label: localize("override.comfort", l),
+              icon: "mdi:air-humidifier",
+            },
+            {
+              value: "own",
+              label: localize("schedule_editor.own", l),
+              icon: "mdi:water-percent",
+            },
+            {
+              value: "off",
+              label: isPl ? "Wyłączony" : "Off",
+              icon: "mdi:air-humidifier-off",
+            },
+          ]}
+          .value=${this._humMode}
+          @value-changed=${this._onHumKind}
+        ></rs-segmented>
+        ${
+          this._humMode === "own"
+            ? html`<div class="temp-row cool">
+                <span>
+                  <ha-icon icon="mdi:air-humidifier" aria-hidden="true"></ha-icon>
+                  ${isPl ? "Nawilżaj poniżej" : "Humidify below"}
+                </span>
+                <rs-stepper
+                  .language=${l}
+                  .label=${isPl ? "Nawilżaj poniżej" : "Humidify below"}
+                  .value=${this._humidify}
+                  .min=${25}
+                  .max=${75}
+                  .step=${1}
+                  .editable=${true}
+                  unit="%"
+                  @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                    this._onHumValue(e.detail.value)}
+                ></rs-stepper>
+              </div>`
+            : this._humMode === "off"
+              ? html`<p class="hint">
+                  ${isPl
+                    ? "Nawilżacz będzie całkowicie wyłączony w tych godzinach (np. w nocy)."
+                    : "The humidifier will stay off during these hours (e.g. at night)."}
+                </p>`
+              : nothing
+        }
+      </div>`;
   }
 
   private _renderPosition() {
@@ -383,6 +452,18 @@ export class RsBlockForm extends LitElement {
           }
         : null,
     });
+  }
+
+  private _onHumKind(e: CustomEvent<{ value: string }>) {
+    const mode = e.detail.value as "comfort" | "own" | "off";
+    this._humMode = mode;
+    const humidify = mode === "comfort" ? null : mode === "off" ? 0 : this._humidify;
+    this._fire("block-temps", { temps: { humidify } });
+  }
+
+  private _onHumValue(v: number) {
+    this._humidify = v;
+    this._fire("block-temps", { temps: { humidify: v } });
   }
 
   private _onTemp(side: "heat" | "cool", v: number) {

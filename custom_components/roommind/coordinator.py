@@ -3362,8 +3362,11 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         uses_dynamic_targets = (
             room.get("comfort_humidify") is not None
             or room.get("comfort_dehumidify") is not None
-            or room.get("eco_humidify") is not None
-            or room.get("eco_dehumidify") is not None
+            or room.get("humidity_min") is not None
+            or room.get("humidity_max") is not None
+            or "eco_humidify" in room
+            or "eco_dehumidify" in room
+            or bool(room.get("schedules"))
             or is_humidity_override_active(room)
         )
         if not uses_dynamic_targets:
@@ -3406,6 +3409,10 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         if res.mpc_active or (uses_dynamic_targets and (targets.humidify != low or targets.dehumidify != high)):
             is_high = res.mode == MODE_DEHUMIDIFYING
             is_low = res.mode == MODE_HUMIDIFYING
+            if targets.humidify is None:
+                is_low = False
+            if targets.dehumidify is None:
+                is_high = False
             humidity_control["humidity_high"] = is_high
             humidity_control["humidity_low"] = is_low
             controlled = settings.get("climate_control_active", True) and room.get(

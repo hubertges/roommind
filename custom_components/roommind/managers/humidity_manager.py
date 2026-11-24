@@ -211,11 +211,11 @@ def humidity_device_claims(
             continue
         low, high = humidity_limits(room)
         rs = room_states.get(area_id) or {}
-        if rs.get("humidify_target") is not None:
+        if "humidify_target" in rs:
             low = _limit(rs.get("humidify_target"))
         elif low is None:
             low = _limit(room.get("comfort_humidify")) or _limit(room.get("override_humidify"))
-        if rs.get("dehumidify_target") is not None:
+        if "dehumidify_target" in rs:
             high = _limit(rs.get("dehumidify_target"))
         elif high is None:
             high = _limit(room.get("comfort_dehumidify")) or _limit(room.get("override_dehumidify"))

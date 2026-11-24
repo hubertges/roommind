@@ -74,6 +74,13 @@ export class RsScheduleSettings extends RsScheduleBase {
   @property({ type: Number }) public ecoHeat = 17.0;
   @property({ type: Number }) public ecoCool = 27.0;
   @property({ type: String }) public climateMode: ClimateMode = "auto";
+  @property({ type: Boolean }) public hasHumidifier = false;
+  @property({ type: Boolean }) public hasDehumidifier = false;
+  @property({ attribute: false }) public comfortHumidify: number | null = null;
+  @property({ attribute: false }) public comfortDehumidify: number | null = null;
+  @property({ attribute: false }) public ecoHumidify: number | null = null;
+  @property({ attribute: false }) public ecoDehumidify: number | null = null;
+  @property({ type: Boolean }) public prehumidifyEnabled = true;
   @property({ attribute: false }) public scheduleTempWarnings: ScheduleTempWarning[] = [];
   @property({ type: Boolean }) public preheatEnabled = true;
   /** Which lead the pre-heat switch controls here ("" hides it). */
@@ -202,6 +209,33 @@ export class RsScheduleSettings extends RsScheduleBase {
       this.climateMode === "auto"
         ? `${fmt(heat)}–${fmt(cool)}\u00a0${unit}`
         : `${fmt(this.climateMode === "cool_only" ? cool : heat)}\u00a0${unit}`;
+    const isPl = (l ?? "pl").toLowerCase().startsWith("pl");
+    const showHum = this.hasHumidifier || this.comfortHumidify != null || this.ecoHumidify != null;
+    const showDehum =
+      this.hasDehumidifier || this.comfortDehumidify != null || this.ecoDehumidify != null;
+    const humSummary = (mode: "comfort" | "eco"): string => {
+      if (!showHum && !showDehum) return "";
+      const parts: string[] = [];
+      if (showHum) {
+        if (mode === "comfort") {
+          parts.push(`💧 ${this.comfortHumidify ?? 40}%`);
+        } else {
+          parts.push(
+            this.ecoHumidify != null && this.ecoHumidify > 0
+              ? `💧 ${this.ecoHumidify}%`
+              : `💧 ${isPl ? "Wył." : "Off"}`,
+          );
+        }
+      }
+      if (showDehum) {
+        const dVal =
+          mode === "comfort"
+            ? (this.comfortDehumidify ?? 60)
+            : (this.ecoDehumidify ?? this.comfortDehumidify ?? 60);
+        parts.push(`≤${dVal}%`);
+      }
+      return parts.length ? ` · ${parts.join(" ")}` : "";
+    };
     const open = (part: ScheduleCardPart) => (e: Event) => this._onEditClick(e, part);
 
     return html`
@@ -259,7 +293,7 @@ export class RsScheduleSettings extends RsScheduleBase {
         icon="mdi:sofa"
         .heading=${localize("override.comfort", l)}
         .secondary=${this._comfortSub()}
-        .value=${band(this.comfortHeat, this.comfortCool)}
+        .value=${`${band(this.comfortHeat, this.comfortCool)}${humSummary("comfort")}`}
         @row-click=${open("temperatures")}
       ></rs-list-row>
       <rs-list-row
@@ -268,9 +302,42 @@ export class RsScheduleSettings extends RsScheduleBase {
         icon="mdi:leaf"
         .heading=${localize("override.eco", l)}
         .secondary=${this._ecoSub()}
-        .value=${band(this.ecoHeat, this.ecoCool)}
+        .value=${`${band(this.ecoHeat, this.ecoCool)}${humSummary("eco")}`}
         @row-click=${open("temperatures")}
       ></rs-list-row>
+      ${
+        showHum
+          ? html`<rs-list-row
+              switch
+              wrap
+              icon=${
+                this.ecoHumidify != null && this.ecoHumidify > 0
+                  ? "mdi:air-humidifier"
+                  : "mdi:air-humidifier-off"
+              }
+              .heading=${
+                isPl
+                  ? "Nawilżacz w nocy / w trybie Eco (poza harmonogramem)"
+                  : "Humidifier at night / during Eco (when schedule is off)"
+              }
+              .secondary=${
+                this.ecoHumidify != null && this.ecoHumidify > 0
+                  ? isPl
+                    ? `Włączony również w nocy / Eco (utrzymuje min. ${this.ecoHumidify}%)`
+                    : `Enabled at night / during Eco (keeps at least ${this.ecoHumidify}%)`
+                  : isPl
+                    ? "Wyłączony w nocy i poza harmonogramem — nawilża tylko w godzinach Komfortu"
+                    : "Disabled at night / outside schedule blocks — humidifies during Comfort only"
+              }
+              .checked=${this.ecoHumidify != null && this.ecoHumidify > 0}
+              @toggle-changed=${(e: CustomEvent<boolean>) =>
+                this._fireValue(
+                  "eco-humidify-changed",
+                  e.detail ? (this.comfortHumidify ?? 40) : null,
+                )}
+            ></rs-list-row>`
+          : nothing
+      }
       ${
         this.presenceAwayAction === "away"
           ? html`<rs-list-row

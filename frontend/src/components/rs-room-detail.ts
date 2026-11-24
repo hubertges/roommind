@@ -734,6 +734,13 @@ export class RsRoomDetail extends LitElement {
           .awayHeat=${this._awayHeat}
           .awayCool=${this._awayCool}
           .climateMode=${this._climateMode}
+          .hasHumidifier=${Boolean(this._humidifierEntity)}
+          .hasDehumidifier=${Boolean(this._dehumidifierEntity)}
+          .comfortHumidify=${this._humidityMin}
+          .comfortDehumidify=${this._humidityMax}
+          .ecoHumidify=${this._ecoHumidify}
+          .ecoDehumidify=${this._ecoDehumidify}
+          .prehumidifyEnabled=${this._prehumidifyEnabled}
           .scheduleTempWarnings=${live?.schedule_temp_warnings ?? []}
           .preheatEnabled=${this._preheatEnabled}
           .followDeviceSetpoint=${this._followDeviceSetpoint}
@@ -747,6 +754,7 @@ export class RsRoomDetail extends LitElement {
           .editing=${false}
           @preheat-changed=${this._onPreheatChanged}
           @follow-device-setpoint-changed=${this._onFollowDeviceSetpointChanged}
+          @eco-humidify-changed=${this._onEcoHumidifyChanged}
         ></rs-schedule-settings>
       </rs-list-card>
 
@@ -1021,12 +1029,22 @@ export class RsRoomDetail extends LitElement {
             .awayHeat=${this._awayHeat}
             .awayCool=${this._awayCool}
             .climateMode=${this._climateMode}
+            .hasHumidifier=${Boolean(this._humidifierEntity)}
+            .hasDehumidifier=${Boolean(this._dehumidifierEntity)}
+            .comfortHumidify=${this._humidityMin}
+            .comfortDehumidify=${this._humidityMax}
+            .ecoHumidify=${this._ecoHumidify}
+            .ecoDehumidify=${this._ecoDehumidify}
             @away-heat-changed=${this._onAwayHeatChanged}
             @away-cool-changed=${this._onAwayCoolChanged}
             @comfort-heat-changed=${this._onComfortHeatChanged}
             @comfort-cool-changed=${this._onComfortCoolChanged}
             @eco-heat-changed=${this._onEcoHeatChanged}
             @eco-cool-changed=${this._onEcoCoolChanged}
+            @comfort-humidify-changed=${this._onComfortHumidifyChanged}
+            @comfort-dehumidify-changed=${this._onComfortDehumidifyChanged}
+            @eco-humidify-changed=${this._onEcoHumidifyChanged}
+            @eco-dehumidify-changed=${this._onEcoDehumidifyChanged}
           ></rs-target-temps>
         </rs-edit-dialog>`;
       case "price":
@@ -1311,6 +1329,26 @@ export class RsRoomDetail extends LitElement {
   private _onEcoHeatChanged(e: CustomEvent<{ value: number }>) {
     this._ecoHeat = e.detail.value;
     if (this._ecoCool < this._ecoHeat) this._ecoCool = this._ecoHeat;
+    this._autoSave();
+  }
+
+  private _onComfortHumidifyChanged(e: CustomEvent<{ value: number | null }>) {
+    this._humidityMin = e.detail.value;
+    this._autoSave();
+  }
+
+  private _onComfortDehumidifyChanged(e: CustomEvent<{ value: number | null }>) {
+    this._humidityMax = e.detail.value;
+    this._autoSave();
+  }
+
+  private _onEcoHumidifyChanged(e: CustomEvent<{ value: number | null }>) {
+    this._ecoHumidify = e.detail.value;
+    this._autoSave();
+  }
+
+  private _onEcoDehumidifyChanged(e: CustomEvent<{ value: number | null }>) {
+    this._ecoDehumidify = e.detail.value;
     this._autoSave();
   }
 
