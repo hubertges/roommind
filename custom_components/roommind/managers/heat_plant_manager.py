@@ -836,6 +836,81 @@ class HeatPlantManager:
                             "Heat plant '%s': climate.set_hvac_mode off failed", plant.name, exc_info=True
                         )
 
+    def _compute_thermal_power_factor(
+        self,
+        plant: HeatPlantConfig,
+        supply_temp: float | None,
+        return_temp: float | None,
+        flue_temp: float | None,
+        delta_t: float | None,
+        heating_demand: bool,
+        dhw_demand: bool,
+        mean_pf: float,
+        source_active: bool,
+        in_fire_hold: bool,
+    ) -> float:
+        """Compute continuous power fraction (0..1) from boiler temperatures, ΔT, demand, and fire-hold state.
+
+        A non-extinguishable solid-fuel boiler (coal/ekogroszek, wood, fireplace) burns continuously:
+        - Even without room/DHW demand, it burns at least ``min_power_pct`` (fire-hold / podtrzymanie ognia)
+          plus extra thermal modulation when supply or flue temperatures are elevated.
+        - When heating or charging DHW, power scales with room demand, supply temperature relative to
+          target, and supply-return ΔT (heat extraction rate).
+        """
+        min_hold_pf = (
+            max(0.05, plant.min_power_pct / 100.0)
+            if (plant.cannot_extinguish and plant.enabled)
+            else 0.0
+        )
+
+        # Temperature-derived power factor from supply, return (ΔT), and flue temperatures
+        temp_pf = 0.0
+        if supply_temp is not None and supply_temp > 25.0:
+            target = max(35.0, plant.target_supply_temp)
+            idle = max(25.0, min(target - 5.0, plant.idle_supply_temp))
+            if supply_temp <= idle:
+                # Warm water in boiler below idle hold setpoint
+                temp_pf = min_hold_pf * max(0.4, (supply_temp - 20.0) / max(10.0, idle - 20.0))
+            else:
+                # Modulate between min_hold_pf and 1.0 as supply approaches/exceeds target_supply_temp
+                span = max(5.0, target - idle)
+                ratio = min(1.15, max(0.0, (supply_temp - idle) / span))
+                temp_pf = min_hold_pf + (0.85 - min_hold_pf) * min(1.0, ratio)
+
+            # Adjust for heat extraction across radiators / UFH (ΔT = supply - return)
+            if delta_t is not None and delta_t > 0:
+                # Typical nominal ΔT at full load is ~12-15 K
+                dt_factor = min(1.25, max(0.2, delta_t / 12.0))
+                temp_pf = max(temp_pf, min(1.0, temp_pf * (0.65 + 0.35 * dt_factor)))
+
+        if flue_temp is not None and flue_temp > 45.0:
+            # Flue gas temperature strongly reflects instantaneous combustion intensity (55°C ember -> 180°C+ full fire)
+            flue_pf = min(1.0, max(min_hold_pf, (flue_temp - 45.0) / 135.0))
+            temp_pf = max(temp_pf, flue_pf)
+
+        if heating_demand and dhw_demand:
+            demand_pf = max(mean_pf, 0.85, temp_pf)
+        elif heating_demand:
+            base_demand = mean_pf if mean_pf > 0 else 0.65
+            # When room demand is known, use it as base and boost if actual boiler temp/ΔT/flue exceeds it
+            demand_pf = max(base_demand, temp_pf * 0.85, min_hold_pf)
+        elif dhw_demand:
+            demand_pf = max(0.75, temp_pf, min_hold_pf)
+        elif in_fire_hold or (plant.cannot_extinguish and plant.enabled):
+            # Continuous fire-hold burn: at least min_hold_pf; modulate up when supply > target or flue is hot
+            extra_hold = 0.0
+            if supply_temp is not None and supply_temp > plant.target_supply_temp:
+                extra_hold = min(0.25, (supply_temp - plant.target_supply_temp) / 40.0)
+            if flue_temp is not None and flue_temp > 110.0:
+                extra_hold = max(extra_hold, min(0.35, (flue_temp - 110.0) / 150.0))
+            demand_pf = min(1.0, min_hold_pf + extra_hold)
+        elif source_active:
+            demand_pf = max(0.5, temp_pf)
+        else:
+            demand_pf = 0.0
+
+        return max(0.0, min(1.0, demand_pf))
+
     def _compute_rates_and_accumulate(
         self,
         plant: HeatPlantConfig,
@@ -846,7 +921,7 @@ class HeatPlantManager:
         now: float,
         dynamic_elec_price: float | None,
     ) -> dict[str, Any]:
-        """Compute instantaneous burn/power/cost rates and update daily/total/maintenance counters."""
+        """Compute instantaneous burn/power/cost rates and continuously update counters over elapsed time."""
         today = dt_util.now().date().isoformat()
         if st.day_str != today:
             st.day_str = today
@@ -858,8 +933,12 @@ class HeatPlantManager:
             self.state_dirty = True
 
         dt_hours = 0.0
-        if st.last_ts is not None and 0 < (now - st.last_ts) <= 3600:
-            dt_hours = (now - st.last_ts) / 3600.0
+        if st.last_ts is not None and now > st.last_ts:
+            # Cap single gap at 24h so multi-hour intervals still integrate continuous burn accurately
+            dt_hours = min(24.0, (now - st.last_ts) / 3600.0)
+        elif st.last_ts is None and st.last_refill_ts is not None and 0 < (now - st.last_refill_ts) <= 86400:
+            # First cycle after creation/restart: integrate elapsed time since last timestamp
+            dt_hours = min(1.0, (now - st.last_refill_ts) / 3600.0)
         st.last_ts = now
 
         # 1. Check external energy_sensor (can be power in W/kW or cumulative energy in kWh)
@@ -908,11 +987,12 @@ class HeatPlantManager:
                 if dt_hours > 0:
                     feeder_fuel_delta = plant.feeder_kg_per_hour * dt_hours
 
-        # Effective power fraction: when in fire-hold (podtrzymanie), solid-fuel boiler burns at min_power_pct
-        if is_running:
-            pf = effective_pf
-        elif in_fire_hold and plant.cannot_extinguish and plant.min_power_pct > 0:
-            pf = plant.min_power_pct / 100.0
+        # Effective power fraction: continuous for non-extinguishable boilers (heating + fire-hold)
+        if is_running or in_fire_hold or (plant.cannot_extinguish and plant.enabled):
+            pf = max(
+                effective_pf,
+                (plant.min_power_pct / 100.0) if (plant.cannot_extinguish and plant.enabled) else 0.0,
+            )
         else:
             pf = 0.0
 
@@ -991,7 +1071,7 @@ class HeatPlantManager:
             fuel_source_mode = "energy_sensor"
 
         if dt_hours > 0 or sensor_fuel_delta is not None or sensor_energy_delta_kwh is not None:
-            if is_running and dt_hours > 0:
+            if (is_running or in_fire_hold) and dt_hours > 0:
                 st.runtime_hours_today += dt_hours
                 st.runtime_hours_total += dt_hours
 
@@ -1124,11 +1204,12 @@ class HeatPlantManager:
         if burn_rate_per_h > 0.05:
             hours_until_refill = round(fuel_remaining_kg / burn_rate_per_h, 1)
 
-        # Ash accumulation
-        estimated_ash_kg = st.fuel_since_ash_clean_kg * (plant.ash_content_pct / 100.0)
+        # Ash accumulation: continuously increases with every gram of fuel burned (not only on refill!)
+        ash_burned_kg = max(st.fuel_since_ash_clean_kg, st.fuel_consumed_total if st.last_ash_clean_ts is None else 0.0)
+        estimated_ash_kg = ash_burned_kg * (plant.ash_content_pct / 100.0)
         days_since_ash = (now - st.last_ash_clean_ts) / 86400.0 if st.last_ash_clean_ts else 0.0
         ash_kg_pct = (
-            (st.fuel_since_ash_clean_kg / plant.ash_clean_interval_kg) * 100.0
+            (ash_burned_kg / plant.ash_clean_interval_kg) * 100.0
             if plant.ash_clean_interval_kg > 0
             else 0.0
         )
@@ -1139,10 +1220,14 @@ class HeatPlantManager:
         )
         ash_fill_pct = min(150.0, max(ash_kg_pct, ash_days_pct))
 
-        # Chimney wear
+        # Chimney wear: continuously increases with burned fuel and elapsed time
+        chimney_burned_kg = max(
+            st.fuel_since_chimney_clean_kg,
+            st.fuel_consumed_total if st.last_chimney_clean_ts is None else 0.0,
+        )
         days_since_chimney = (now - st.last_chimney_clean_ts) / 86400.0 if st.last_chimney_clean_ts else 0.0
         chimney_kg_pct = (
-            (st.fuel_since_chimney_clean_kg / plant.chimney_clean_interval_kg) * 100.0
+            (chimney_burned_kg / plant.chimney_clean_interval_kg) * 100.0
             if plant.chimney_clean_interval_kg > 0
             else 0.0
         )
@@ -1536,9 +1621,11 @@ class HeatPlantManager:
                     or (flue_temp is not None and flue_temp >= 80.0)
                 )
 
-            # Determine if a non-extinguishable plant is currently in fire-hold (podtrzymanie ognia)
+            # Determine if a non-extinguishable plant is currently in fire-hold (podtrzymanie ognia).
+            # A coal/wood boiler with cannot_extinguish=True burns continuously 24/7 unless explicitly disabled.
             fire_alive = (
-                source_active
+                plant.cannot_extinguish
+                or source_active
                 or (
                     supply_temp is not None
                     and plant.ch_pump_min_supply_temp > 0
@@ -1546,6 +1633,13 @@ class HeatPlantManager:
                 )
                 or (flue_temp is not None and flue_temp >= 55.0)
             )
+            if plant.plant_type == PLANT_TYPE_FIREPLACE and not plant.source_entity:
+                # A manual fireplace without a control entity is in fire-hold only when warm/lit or demanding
+                fire_alive = (
+                    source_active
+                    or (supply_temp is not None and supply_temp >= 35.0)
+                    or (flue_temp is not None and flue_temp >= 55.0)
+                )
             in_fire_hold = (
                 plant.cannot_extinguish
                 and plant.enabled
@@ -1580,10 +1674,17 @@ class HeatPlantManager:
                 for aid in demanding_rooms:
                     covered_rooms_by_higher_priority.setdefault(aid, pid)
 
-            eff_pf = (
-                mean_pf
-                if heating_demand
-                else (1.0 if dhw_demand else (plant.min_power_pct / 100.0 if in_fire_hold else (1.0 if source_active else 0.0)))
+            eff_pf = self._compute_thermal_power_factor(
+                plant=plant,
+                supply_temp=supply_temp,
+                return_temp=return_temp,
+                flue_temp=flue_temp,
+                delta_t=delta_t,
+                heating_demand=heating_demand,
+                dhw_demand=dhw_demand,
+                mean_pf=mean_pf,
+                source_active=source_active,
+                in_fire_hold=in_fire_hold,
             )
             metrics = self._compute_rates_and_accumulate(
                 plant=plant,

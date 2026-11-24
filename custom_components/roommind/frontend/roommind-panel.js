@@ -8024,7 +8024,7 @@
           grid-template-columns: repeat(4, minmax(0, 1fr));
         }
       }
-    `]}};P([C({attribute:!1})],uc.prototype,`hass`,void 0),P([C({attribute:!1})],uc.prototype,`data`,void 0),P([C({type:String})],uc.prototype,`language`,void 0),P([C({type:String})],uc.prototype,`controlMode`,void 0),P([C({type:Boolean})],uc.prototype,`managed`,void 0),P([C({attribute:!1})],uc.prototype,`boostHours`,void 0),P([C({type:Boolean})],uc.prototype,`canHeat`,void 0),P([C({type:Boolean})],uc.prototype,`canCool`,void 0),uc=P([S(`rs-analytics-model`)],uc),x(),T(),F();var dc=class extends b{constructor(...e){super(...e),this.heatPlants=[],this.heatPlantsLive={},this.heatPlantsHistory={},this.rangeStart=0,this.rangeEnd=0,this._selectedPlantId=``,this._fuelInputKg=25,this._busyAction=``,this._hiddenSeries=new Set}get _isPl(){return(this.hass?.language??`en`).toLowerCase().startsWith(`pl`)}_t(e,t){return this._isPl?e:t}willUpdate(){this.heatPlants.length>0&&(!this._selectedPlantId||!this.heatPlants.some(e=>e.id===this._selectedPlantId))&&(this._selectedPlantId=this.heatPlants[0].id)}_plantIcon(e){switch(e){case`coal_boiler`:case`pellet_boiler`:case`wood_boiler`:return`mdi:fireplace-off`;case`fireplace`:return`mdi:fireplace`;case`gas_boiler`:return`mdi:fire`;case`heat_pump`:return`mdi:heat-pump`;case`electric_heater`:return`mdi:radiator`;case`air_heater`:return`mdi:fan`;default:return`mdi:radiator`}}_stateLabel(e){switch(e){case`heating`:return this._t(`Grzanie C.O.`,`Heating`);case`hold`:return this._t(`Podtrzymanie ognia`,`Fire-hold`);case`dhw`:return this._t(`Grzanie CWU`,`DHW`);case`heating_and_dhw`:return this._t(`C.O. + CWU`,`Heating + DHW`);case`overheat_protect`:return this._t(`Ochrona przegrzania!`,`Overheat protect!`);case`idle`:return this._t(`Czuwanie`,`Idle`);default:return this._t(`Wyłączony`,`Off`)}}_stateClass(e){return e===`overheat_protect`?`overheat`:e===`hold`?`hold`:e===`heating`||e===`dhw`||e===`heating_and_dhw`?`active`:`idle`}async _confirmMaintenance(e,t){this._busyAction=`${e}:${t}`;try{let n={type:`roommind/heat_plants/maintenance`,plant_id:e,action:t};if(t===`refill`){let t=this.heatPlants.find(t=>t.id===e)?.hopper_capacity_kg??0;t>0&&(n.kg=t)}await this.hass.callWS(n),I(this,`saved`),this.dispatchEvent(new CustomEvent(`heat-plants-updated`,{bubbles:!0,composed:!0}))}catch{I(this,`error`)}finally{this._busyAction=``}}async _logFuel(e,t){let n=Number(this._fuelInputKg);if(!(!Number.isFinite(n)||n<=0)){this._busyAction=`${e}:${t}`;try{await this.hass.callWS({type:`roommind/heat_plants/log_fuel`,plant_id:e,kg:n,mode:t}),I(this,`saved`),this.dispatchEvent(new CustomEvent(`heat-plants-updated`,{bubbles:!0,composed:!0}))}catch{I(this,`error`)}finally{this._busyAction=``}}}_toggleSeries(e){let t=new Set(this._hiddenSeries);t.has(e)?t.delete(e):t.add(e),this._hiddenSeries=t}render(){if(!this.heatPlants||this.heatPlants.length===0)return y;let e=this.heatPlants[0]?.currency||`PLN`,t=0,n=0,r=0,i=0,a=0,o=0,s=0;for(let e of this.heatPlants){let c=this.heatPlantsLive[e.id];c&&(t+=c.fuel_consumed_today??0,n+=c.fuel_consumed_total??0,r+=c.thermal_kwh_today??0,i+=c.thermal_kwh_total??0,a+=c.cost_today??0,o+=c.cost_total??0,c.refill_needed&&s++,c.ash_clean_needed&&s++,c.chimney_clean_needed&&s++,c.overheat_protect&&s++)}let c=this.heatPlants.find(e=>e.id===this._selectedPlantId)??this.heatPlants[0],l=this.heatPlantsLive[c.id],u=this.heatPlantsHistory[c.id]??[];return v`
+    `]}};P([C({attribute:!1})],uc.prototype,`hass`,void 0),P([C({attribute:!1})],uc.prototype,`data`,void 0),P([C({type:String})],uc.prototype,`language`,void 0),P([C({type:String})],uc.prototype,`controlMode`,void 0),P([C({type:Boolean})],uc.prototype,`managed`,void 0),P([C({attribute:!1})],uc.prototype,`boostHours`,void 0),P([C({type:Boolean})],uc.prototype,`canHeat`,void 0),P([C({type:Boolean})],uc.prototype,`canCool`,void 0),uc=P([S(`rs-analytics-model`)],uc),x(),T(),F();var dc=class extends b{constructor(...e){super(...e),this.heatPlants=[],this.heatPlantsLive={},this.heatPlantsHistory={},this.rangeStart=0,this.rangeEnd=0,this._selectedPlantId=``,this._hiddenSeries=new Set}get _isPl(){return(this.hass?.language??`en`).toLowerCase().startsWith(`pl`)}_t(e,t){return this._isPl?e:t}willUpdate(){this.heatPlants.length>0&&(!this._selectedPlantId||!this.heatPlants.some(e=>e.id===this._selectedPlantId))&&(this._selectedPlantId=this.heatPlants[0].id)}_plantIcon(e){switch(e){case`coal_boiler`:case`pellet_boiler`:case`wood_boiler`:return`mdi:fireplace-off`;case`fireplace`:return`mdi:fireplace`;case`gas_boiler`:return`mdi:fire`;case`heat_pump`:return`mdi:heat-pump`;case`electric_heater`:return`mdi:radiator`;case`air_heater`:return`mdi:fan`;default:return`mdi:radiator`}}_stateLabel(e){switch(e){case`heating`:return this._t(`Grzanie C.O.`,`Heating`);case`hold`:return this._t(`Podtrzymanie ognia`,`Fire-hold`);case`dhw`:return this._t(`Grzanie CWU`,`DHW`);case`heating_and_dhw`:return this._t(`C.O. + CWU`,`Heating + DHW`);case`overheat_protect`:return this._t(`Ochrona przegrzania!`,`Overheat protect!`);case`idle`:return this._t(`Czuwanie`,`Idle`);default:return this._t(`Wyłączony`,`Off`)}}_stateClass(e){return e===`overheat_protect`?`overheat`:e===`hold`?`hold`:e===`heating`||e===`dhw`||e===`heating_and_dhw`?`active`:`idle`}_toggleSeries(e){let t=new Set(this._hiddenSeries);t.has(e)?t.delete(e):t.add(e),this._hiddenSeries=t}render(){if(!this.heatPlants||this.heatPlants.length===0)return y;let e=this.heatPlants[0]?.currency||`PLN`,t=0,n=0,r=0,i=0,a=0,o=0,s=0;for(let e of this.heatPlants){let c=this.heatPlantsLive[e.id];c&&(t+=c.fuel_consumed_today??0,n+=c.fuel_consumed_total??0,r+=c.thermal_kwh_today??0,i+=c.thermal_kwh_total??0,a+=c.cost_today??0,o+=c.cost_total??0,c.refill_needed&&s++,c.ash_clean_needed&&s++,c.chimney_clean_needed&&s++,c.overheat_protect&&s++)}let c=this.heatPlants.find(e=>e.id===this._selectedPlantId)??this.heatPlants[0],l=this.heatPlantsLive[c.id],u=this.heatPlantsHistory[c.id]??[];return v`
       <rs-list-card
         unclipped
         .heading=${this._t(`Kotłownia, kominek i źródła ciepła — analiza i obsługa`,`Heat Plants, Fireplace & Heating Sources — Analytics & Maintenance`)}
@@ -8100,7 +8100,6 @@
 
           ${this._renderSelectedSensors(c,l)}
           ${this._renderMaintenanceSection(c,l)}
-          ${this._renderFuelLogBar(c)}
           ${this._renderPeriodStats(c,u)}
           ${this._renderHistoryChart(c,u)}
         </div>
@@ -8128,13 +8127,14 @@
         <div class="maint-card ${t?.refill_needed?`warn`:``}">
           <div class="maint-head">
             <ha-icon icon="mdi:silo"></ha-icon>
-            <span>${this._t(`Dołożenie opału / Zasobnik`,`Refuel / Hopper`)}</span>
-            ${t?.refill_needed?v`<span class="maint-badge">${this._t(`DOŁÓŻ!`,`REFILL!`)}</span>`:y}
+            <span>${this._t(`Stan zasobnika (auto-wyliczany)`,`Hopper level (auto-calculated)`)}</span>
+            ${t?.refill_needed?v`<span class="maint-badge">${this._t(`NISKI POZIOM!`,`LOW!`)}</span>`:y}
           </div>
           <div class="maint-info">
             ${t?.fuel_remaining_kg==null?this._t(`Brak danych zasobnika`,`No hopper data`):`${D(t.fuel_remaining_kg,this.hass,1)} kg`}${n==null?``:` (${Math.round(n)}%)`}
-            · ${this._t(`Od zasypu`,`Since refill`)}:
+            · ${this._t(`Spalono od zasypu`,`Burned since refill`)}:
             ${D(t?.fuel_since_refill_kg??0,this.hass,1)} kg
+            ${t?.hours_until_refill==null?``:` · ~${D(t.hours_until_refill,this.hass,1)} h`}
           </div>
           ${n==null?y:v`<div class="progress">
                   <div
@@ -8142,27 +8142,18 @@
                     style="width: ${Math.max(4,Math.min(100,n))}%"
                   ></div>
                 </div>`}
-          <button
-            type="button"
-            class="maint-btn"
-            ?disabled=${this._busyAction===`${e.id}:refill`}
-            @click=${()=>this._confirmMaintenance(e.id,`refill`)}
-          >
-            <ha-icon icon="mdi:check"></ha-icon>
-            ${this._t(`Potwierdź dołożenie / zasyp`,`Confirm refuel`)}
-          </button>
         </div>
 
         <div class="maint-card ${t?.ash_clean_needed?`warn`:``}">
           <div class="maint-head">
             <ha-icon icon="mdi:delete-sweep"></ha-icon>
-            <span>${this._t(`Zbiornik na popiół`,`Ash container`)}</span>
-            ${t?.ash_clean_needed?v`<span class="maint-badge">${this._t(`OPRÓŻNIJ!`,`EMPTY!`)}</span>`:y}
+            <span>${this._t(`Zbierający się popiół (ciągły)`,`Ash accumulation (continuous)`)}</span>
+            ${t?.ash_clean_needed?v`<span class="maint-badge">${this._t(`PEŁNY!`,`FULL!`)}</span>`:y}
           </div>
           <div class="maint-info">
             ${D(r,this.hass,1)} / ${i||`—`} kg ·
             ${D(a,this.hass,1)} / ${o||`—`} d
-            ${t?.estimated_ash_kg==null?``:` · ~${D(t.estimated_ash_kg,this.hass,1)} kg ${this._t(`popiołu`,`ash`)}`}
+            ${t?.estimated_ash_kg==null?``:` · ~${D(t.estimated_ash_kg,this.hass,2)} kg ${this._t(`popiołu`,`ash`)}`}
           </div>
           <div class="progress">
             <div
@@ -8170,22 +8161,13 @@
               style="width: ${Math.max(2,s)}%"
             ></div>
           </div>
-          <button
-            type="button"
-            class="maint-btn"
-            ?disabled=${this._busyAction===`${e.id}:ash_cleaned`}
-            @click=${()=>this._confirmMaintenance(e.id,`ash_cleaned`)}
-          >
-            <ha-icon icon="mdi:broom"></ha-icon>
-            ${this._t(`Opróżniono popielnik`,`Ash tray emptied`)}
-          </button>
         </div>
 
         <div class="maint-card ${t?.chimney_clean_needed?`warn`:``}">
           <div class="maint-head">
             <ha-icon icon="mdi:chimney"></ha-icon>
-            <span>${this._t(`Czyszczenie komina`,`Chimney cleaning`)}</span>
-            ${t?.chimney_clean_needed?v`<span class="maint-badge">${this._t(`WYCZYŚĆ!`,`CLEAN!`)}</span>`:y}
+            <span>${this._t(`Zużycie komina (ciągłe)`,`Chimney wear (continuous)`)}</span>
+            ${t?.chimney_clean_needed?v`<span class="maint-badge">${this._t(`WYMAGANE!`,`DUE!`)}</span>`:y}
           </div>
           <div class="maint-info">
             ${D(c,this.hass,0)} / ${l||`—`} kg ·
@@ -8197,47 +8179,7 @@
               style="width: ${Math.max(2,f)}%"
             ></div>
           </div>
-          <button
-            type="button"
-            class="maint-btn"
-            ?disabled=${this._busyAction===`${e.id}:chimney_cleaned`}
-            @click=${()=>this._confirmMaintenance(e.id,`chimney_cleaned`)}
-          >
-            <ha-icon icon="mdi:brush"></ha-icon>
-            ${this._t(`Wyczyszczono komin`,`Chimney cleaned`)}
-          </button>
         </div>
-      </div>
-    `}_renderFuelLogBar(e){return e.fuel_type!==`coal`&&e.fuel_type!==`pellet`&&e.fuel_type!==`wood`?y:v`
-      <div class="fuel-log-bar">
-        <span class="fuel-log-label">
-          <ha-icon icon="mdi:weight-kilogram"></ha-icon>
-          ${this._t(`Szybki wpis opału (kg):`,`Quick fuel log (kg):`)}
-        </span>
-        <input
-          type="number"
-          min="0.5"
-          max="5000"
-          step="1"
-          .value=${String(this._fuelInputKg)}
-          @input=${e=>{this._fuelInputKg=Number(e.target.value)}}
-        />
-        <button
-          type="button"
-          class="fuel-btn primary"
-          ?disabled=${!!this._busyAction}
-          @click=${()=>this._logFuel(e.id,`refill`)}
-        >
-          ${this._t(`+ Dosyp do zasobnika`,`+ Refill hopper`)}
-        </button>
-        <button
-          type="button"
-          class="fuel-btn"
-          ?disabled=${!!this._busyAction}
-          @click=${()=>this._logFuel(e.id,`burned`)}
-        >
-          ${this._t(`+ Zapisz spalone (kg)`,`+ Log burned (kg)`)}
-        </button>
       </div>
     `}_renderPeriodStats(e,t){if(!t||t.length<2)return y;let n=k(this.hass),r=this.heatPlantsLive[e.id]?.fuel_unit||`kg`,i=0,a=0,o=0,s=0,c=null,l=[],u=[],d=[],f=[];for(let e=0;e<t.length;e++){let n=t[e];if(n.supply_temp!=null&&l.push(n.supply_temp),n.return_temp!=null&&u.push(n.return_temp),n.flue_temp!=null&&d.push(n.flue_temp),n.thermal_kw!=null&&f.push(n.thermal_kw),n.fuel_consumed_today!=null&&(c!=null&&(n.fuel_consumed_today>=c?s+=n.fuel_consumed_today-c:s+=n.fuel_consumed_today),c=n.fuel_consumed_today),e+1<t.length){let r=Math.min(Math.max(0,t[e+1].ts-n.ts),1800);n.state===`heating`||n.state===`dhw`||n.state===`heating_and_dhw`||n.state===`active`?i+=r:n.state===`hold`?a+=r:o+=r}}let p=i+a+o,m=i/3600,h=a/3600,ee=o/3600,g=e=>e.length>0?e.reduce((e,t)=>e+t,0)/e.length:null,te=e=>e.length>0?Math.max(...e):null,ne=g(l),re=te(l),ie=g(u),ae=te(d),oe=g(f),se=te(f);return v`
       <div class="period-box">
@@ -8789,7 +8731,7 @@
       .period-metrics b {
         color: var(--primary-text-color);
       }
-    `]}};P([C({attribute:!1})],dc.prototype,`hass`,void 0),P([C({attribute:!1})],dc.prototype,`heatPlants`,void 0),P([C({attribute:!1})],dc.prototype,`heatPlantsLive`,void 0),P([C({attribute:!1})],dc.prototype,`heatPlantsHistory`,void 0),P([C({type:Number})],dc.prototype,`rangeStart`,void 0),P([C({type:Number})],dc.prototype,`rangeEnd`,void 0),P([w()],dc.prototype,`_selectedPlantId`,void 0),P([w()],dc.prototype,`_fuelInputKg`,void 0),P([w()],dc.prototype,`_busyAction`,void 0),P([w()],dc.prototype,`_hiddenSeries`,void 0),dc=P([S(`rs-analytics-heat-plants`)],dc),x(),T(),F();function fc(e){return{canHeat:e?.climate_mode!==`cool_only`,canCool:e?.climate_mode!==`heat_only`&&(e?.devices??[]).some(e=>e.type===`ac`),hasWindowSensor:(e?.window_sensors?.length??0)>0,hasHumidityControl:!!(e?.humidifier_entity||e?.dehumidifier_entity||e?.humidity_min!=null||e?.humidity_max!=null||e?.comfort_humidify!=null||e?.comfort_dehumidify!=null),followsPrice:!e?.is_outdoor&&((e?.price_shift??0)>0||!!e?.heat_source_price_aware)}}function pc(e){return e===`heat_only`?`heat`:e===`cool_only`?`cool`:`both`}var mc=class extends b{constructor(...e){super(...e),this.rooms={},this.heatPlants=[],this.heatPlantsLive={},this.initialRoom=``,this.controlMode=`mpc`,this._selectedRoom=``,this._rangeStart=new Date(new Date().setHours(0,0,0,0)).getTime(),this._rangeEnd=Date.now(),this._data=null,this._chartAnchor=Date.now(),this._loading=!1,this._activeQuick=`24h`,this._dataRoom=``,this._pointsOf=null,this._pointsCache=[],this._fetchId=0,this._zoneApplied=!1}connectedCallback(){super.connectedCallback(),this._refreshInterval=setInterval(()=>this._silentRefresh(),6e4)}disconnectedCallback(){super.disconnectedCallback(),this._refreshInterval&&=(clearInterval(this._refreshInterval),void 0)}willUpdate(e){!this._zoneApplied&&this.hass&&this._activeQuick&&(this._zoneApplied=!0,this._applyQuickRange()),e.has(`initialRoom`)&&this.initialRoom&&(this._selectedRoom=this.initialRoom);let t=!1;if(e.has(`rooms`)&&!this._selectedRoom){let e=Object.keys(this.rooms);e.length>0&&(this._selectedRoom=e[0],t=!0,this.dispatchEvent(new CustomEvent(`room-selected`,{detail:{areaId:e[0]},bubbles:!0,composed:!0})))}(t||e.has(`_selectedRoom`)||e.has(`_rangeStart`)||e.has(`_rangeEnd`))&&this._selectedRoom&&this._fetchData()}render(){let e=this.hass.language,t=fc(this.rooms[this._selectedRoom]),n=this._data?.heat_plants??this.heatPlants,r=this._data?.heat_plants_live??this.heatPlantsLive,i=this._data?.heat_plants_history??{};return v`
+    `]}};P([C({attribute:!1})],dc.prototype,`hass`,void 0),P([C({attribute:!1})],dc.prototype,`heatPlants`,void 0),P([C({attribute:!1})],dc.prototype,`heatPlantsLive`,void 0),P([C({attribute:!1})],dc.prototype,`heatPlantsHistory`,void 0),P([C({type:Number})],dc.prototype,`rangeStart`,void 0),P([C({type:Number})],dc.prototype,`rangeEnd`,void 0),P([w()],dc.prototype,`_selectedPlantId`,void 0),P([w()],dc.prototype,`_hiddenSeries`,void 0),dc=P([S(`rs-analytics-heat-plants`)],dc),x(),T(),F();function fc(e){return{canHeat:e?.climate_mode!==`cool_only`,canCool:e?.climate_mode!==`heat_only`&&(e?.devices??[]).some(e=>e.type===`ac`),hasWindowSensor:(e?.window_sensors?.length??0)>0,hasHumidityControl:!!(e?.humidifier_entity||e?.dehumidifier_entity||e?.humidity_min!=null||e?.humidity_max!=null||e?.comfort_humidify!=null||e?.comfort_dehumidify!=null),followsPrice:!e?.is_outdoor&&((e?.price_shift??0)>0||!!e?.heat_source_price_aware)}}function pc(e){return e===`heat_only`?`heat`:e===`cool_only`?`cool`:`both`}var mc=class extends b{constructor(...e){super(...e),this.rooms={},this.heatPlants=[],this.heatPlantsLive={},this.initialRoom=``,this.controlMode=`mpc`,this._selectedRoom=``,this._rangeStart=new Date(new Date().setHours(0,0,0,0)).getTime(),this._rangeEnd=Date.now(),this._data=null,this._chartAnchor=Date.now(),this._loading=!1,this._activeQuick=`24h`,this._dataRoom=``,this._pointsOf=null,this._pointsCache=[],this._fetchId=0,this._zoneApplied=!1}connectedCallback(){super.connectedCallback(),this._refreshInterval=setInterval(()=>this._silentRefresh(),6e4)}disconnectedCallback(){super.disconnectedCallback(),this._refreshInterval&&=(clearInterval(this._refreshInterval),void 0)}willUpdate(e){!this._zoneApplied&&this.hass&&this._activeQuick&&(this._zoneApplied=!0,this._applyQuickRange()),e.has(`initialRoom`)&&this.initialRoom&&(this._selectedRoom=this.initialRoom);let t=!1;if(e.has(`rooms`)&&!this._selectedRoom){let e=Object.keys(this.rooms);e.length>0&&(this._selectedRoom=e[0],t=!0,this.dispatchEvent(new CustomEvent(`room-selected`,{detail:{areaId:e[0]},bubbles:!0,composed:!0})))}(t||e.has(`_selectedRoom`)||e.has(`_rangeStart`)||e.has(`_rangeEnd`))&&this._selectedRoom&&this._fetchData()}render(){let e=this.hass.language,t=fc(this.rooms[this._selectedRoom]),n=this._data?.heat_plants??this.heatPlants,r=this._data?.heat_plants_live??this.heatPlantsLive,i=this._data?.heat_plants_history??{};return v`
       <rs-analytics-toolbar
         .hass=${this.hass}
         .rooms=${this.rooms}
@@ -9738,7 +9680,11 @@
       </div>
     </ha-card>`}_renderFuelLogAndMaintenance(e,t){let n=t?.hopper_pct??100,r=t?.fuel_remaining_kg??e.hopper_capacity_kg??100,i=t?.ash_fill_pct??0,a=t?.chimney_wear_pct??0,o=this._fuelInputKg[e.id]??(e.plant_type===`fireplace`?5:25);return v`
       <div class="fuel-log-row">
-        <span><b>${this._t(`Rejestr opału (kg):`,`Manual fuel log (kg):`)}</b></span>
+        <span>
+          <b
+            >${this._t(`Auto-kalkulacja 24/7 aktywna (czas + temp. + moc pieca) · Ręczny zasyp:`,`24/7 auto-calculation active (time + temp + power) · Manual refill:`)}</b
+          >
+        </span>
         <input
           class="fuel-log-input"
           type="number"
@@ -9754,14 +9700,14 @@
           class="preset-btn accent"
           @click=${()=>this._onLogFuel(e.id,o,`refill`)}
         >
-          + ${this._t(`Zasyp / Dołóż do zasobnika`,`Refill hopper`)}
+          + ${this._t(`Zasypano / Dołożono do zasobnika`,`Refilled hopper`)}
         </button>
         <button
           type="button"
           class="preset-btn"
           @click=${()=>this._onLogFuel(e.id,o,`burned`)}
         >
-          + ${this._t(`Zapisz jako spalone (kg)`,`Log as burned (kg)`)}
+          + ${this._t(`Korekta spalonego (+kg)`,`Adjust burned (+kg)`)}
         </button>
       </div>
 
@@ -9771,7 +9717,7 @@
           <div class="maint-head">
             <span class="maint-head-left">
               <ha-icon icon="mdi:silo"></ha-icon>
-              ${this._t(`Zasobnik / Dołożenie opału`,`Hopper / Refuel`)}
+              ${this._t(`Zasobnik (ubywa automatycznie w czasie)`,`Hopper (auto-depletes over time)`)}
             </span>
             <b>${D(r,this.hass,1)} kg (${Math.round(n)}%)</b>
           </div>
@@ -9782,8 +9728,8 @@
             ></i>
           </div>
           <div class="metric-sub">
-            ${this._t(`Spalono od zasypu`,`Burned since refill`)}:
-            ${D(t?.fuel_since_refill_kg??0,this.hass,1)} kg
+            ${this._t(`Auto-spalono od zasypu`,`Auto-burned since refill`)}:
+            ${D(t?.fuel_since_refill_kg??0,this.hass,2)} kg
             ${t?.hours_until_refill==null?``:` · ~${D(t.hours_until_refill,this.hass,1)} h`}
           </div>
           <div class="maint-actions">
@@ -9792,7 +9738,7 @@
               class="preset-btn accent"
               @click=${()=>this._onMaintenance(e.id,`refill`)}
             >
-              ${this._t(`Dołożono do pełna`,`Refilled to full`)}
+              ${this._t(`Zasypano zasobnik do pełna`,`Hopper refilled to full`)}
             </button>
           </div>
         </div>
@@ -9802,9 +9748,9 @@
           <div class="maint-head">
             <span class="maint-head-left">
               <ha-icon icon="mdi:delete-variant"></ha-icon>
-              ${this._t(`Zbiornik na popiół`,`Ash Container`)}
+              ${this._t(`Popielnik (zbiera się ciągle podczas palenia)`,`Ash Tray (accumulates continuously)`)}
             </span>
-            <b>${Math.round(i)}% (~${D(t?.estimated_ash_kg??0,this.hass,1)} kg)</b>
+            <b>${Math.round(i)}% (~${D(t?.estimated_ash_kg??0,this.hass,2)} kg)</b>
           </div>
           <div class="maint-bar">
             <i
@@ -9813,10 +9759,10 @@
             ></i>
           </div>
           <div class="metric-sub">
-            ${this._t(`Spalono`,`Burned`)}:
-            ${D(t?.fuel_since_ash_clean_kg??0,this.hass,1)} /
+            ${this._t(`Spalono od czyszczenia`,`Burned since cleaning`)}:
+            ${D(t?.fuel_since_ash_clean_kg??0,this.hass,2)} /
             ${e.ash_clean_interval_kg??150} kg ·
-            ${D(t?.days_since_ash_clean??0,this.hass,0)}
+            ${D(t?.days_since_ash_clean??0,this.hass,1)}
             ${this._t(`dni`,`days`)}
           </div>
           <div class="maint-actions">

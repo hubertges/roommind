@@ -1,11 +1,10 @@
 /**
- * rs-analytics-heat-plants – Heat sources & boiler analytics section on the Analytics dashboard.
+ * rs-analytics-heat-plants – Read-only heat sources & boiler analytics section on the Analytics dashboard.
  *
- * Displays:
+ * Displays (read-only analysis only; all control & refuel/cleaning actions live in the Heat Sources tab):
  * - Multi-source fuel (kg), thermal energy (kWh), cost, and maintenance alerts overview
  * - Live sensors of each heat source (supply/return/DHW/flue temps, ΔT, power, kg burned, hopper, pumps)
- * - Maintenance progress & 1-click confirmations (refill / ash tray / chimney cleaning)
- * - Quick manual fuel logging (kg burned or hopper refill)
+ * - Read-only maintenance progress gauges (hopper level, continuous ash accumulation, chimney wear)
  * - Time-series chart of temperatures, thermal power, and burn rate over the selected analytics range
  */
 import { LitElement, html, css, nothing } from "lit";
@@ -20,7 +19,7 @@ import type {
 import { tokens } from "../../styles/tokens";
 import { formatTempLocale, tempUnit } from "../../utils/temperature";
 import { formatNumber } from "../../utils/format";
-import { fireSaveStatus, openEntityInfo } from "../../utils/events";
+import { openEntityInfo } from "../../utils/events";
 import "../shared/rs-list-card";
 
 @customElement("rs-analytics-heat-plants")
@@ -36,8 +35,6 @@ export class RsAnalyticsHeatPlants extends LitElement {
   @property({ type: Number }) public rangeEnd = 0;
 
   @state() private _selectedPlantId = "";
-  @state() private _fuelInputKg = 25;
-  @state() private _busyAction = "";
   @state() private _hiddenSeries = new Set<string>();
 
   private get _isPl(): boolean {
@@ -102,56 +99,6 @@ export class RsAnalyticsHeatPlants extends LitElement {
     if (st === "hold") return "hold";
     if (st === "heating" || st === "dhw" || st === "heating_and_dhw") return "active";
     return "idle";
-  }
-
-  private async _confirmMaintenance(
-    plantId: string,
-    action: "refill" | "ash_cleaned" | "chimney_cleaned",
-  ) {
-    this._busyAction = `${plantId}:${action}`;
-    try {
-      const payload: Record<string, unknown> = {
-        type: "roommind/heat_plants/maintenance",
-        plant_id: plantId,
-        action,
-      };
-      if (action === "refill") {
-        const plant = this.heatPlants.find((p) => p.id === plantId);
-        const cap = plant?.hopper_capacity_kg ?? 0;
-        if (cap > 0) payload.kg = cap;
-      }
-      await this.hass.callWS(payload);
-      fireSaveStatus(this, "saved");
-      this.dispatchEvent(
-        new CustomEvent("heat-plants-updated", { bubbles: true, composed: true }),
-      );
-    } catch {
-      fireSaveStatus(this, "error");
-    } finally {
-      this._busyAction = "";
-    }
-  }
-
-  private async _logFuel(plantId: string, mode: "burned" | "refill") {
-    const kg = Number(this._fuelInputKg);
-    if (!Number.isFinite(kg) || kg <= 0) return;
-    this._busyAction = `${plantId}:${mode}`;
-    try {
-      await this.hass.callWS({
-        type: "roommind/heat_plants/log_fuel",
-        plant_id: plantId,
-        kg,
-        mode,
-      });
-      fireSaveStatus(this, "saved");
-      this.dispatchEvent(
-        new CustomEvent("heat-plants-updated", { bubbles: true, composed: true }),
-      );
-    } catch {
-      fireSaveStatus(this, "error");
-    } finally {
-      this._busyAction = "";
-    }
   }
 
   private _toggleSeries(id: string) {
@@ -288,7 +235,6 @@ export class RsAnalyticsHeatPlants extends LitElement {
 
           ${this._renderSelectedSensors(selected, live)}
           ${this._renderMaintenanceSection(selected, live)}
-          ${this._renderFuelLogBar(selected)}
           ${this._renderPeriodStats(selected, history)}
           ${this._renderHistoryChart(selected, history)}
         </div>
@@ -513,10 +459,10 @@ export class RsAnalyticsHeatPlants extends LitElement {
         <div class="maint-card ${live?.refill_needed ? "warn" : ""}">
           <div class="maint-head">
             <ha-icon icon="mdi:silo"></ha-icon>
-            <span>${this._t("Dołożenie opału / Zasobnik", "Refuel / Hopper")}</span>
+            <span>${this._t("Stan zasobnika (auto-wyliczany)", "Hopper level (auto-calculated)")}</span>
             ${
               live?.refill_needed
-                ? html`<span class="maint-badge">${this._t("DOŁÓŻ!", "REFILL!")}</span>`
+                ? html`<span class="maint-badge">${this._t("NISKI POZIOM!", "LOW!")}</span>`
                 : nothing
             }
           </div>
@@ -526,8 +472,13 @@ export class RsAnalyticsHeatPlants extends LitElement {
                 ? `${formatNumber(live.fuel_remaining_kg, this.hass, 1)} kg`
                 : this._t("Brak danych zasobnika", "No hopper data")
             }${hopperPct != null ? ` (${Math.round(hopperPct)}%)` : ""}
-            · ${this._t("Od zasypu", "Since refill")}:
+            · ${this._t("Spalono od zasypu", "Burned since refill")}:
             ${formatNumber(live?.fuel_since_refill_kg ?? 0, this.hass, 1)} kg
+            ${
+              live?.hours_until_refill != null
+                ? ` · ~${formatNumber(live.hours_until_refill, this.hass, 1)} h`
+                : ""
+            }
           </div>
           ${
             hopperPct != null
@@ -539,24 +490,15 @@ export class RsAnalyticsHeatPlants extends LitElement {
                 </div>`
               : nothing
           }
-          <button
-            type="button"
-            class="maint-btn"
-            ?disabled=${this._busyAction === `${plant.id}:refill`}
-            @click=${() => this._confirmMaintenance(plant.id, "refill")}
-          >
-            <ha-icon icon="mdi:check"></ha-icon>
-            ${this._t("Potwierdź dołożenie / zasyp", "Confirm refuel")}
-          </button>
         </div>
 
         <div class="maint-card ${live?.ash_clean_needed ? "warn" : ""}">
           <div class="maint-head">
             <ha-icon icon="mdi:delete-sweep"></ha-icon>
-            <span>${this._t("Zbiornik na popiół", "Ash container")}</span>
+            <span>${this._t("Zbierający się popiół (ciągły)", "Ash accumulation (continuous)")}</span>
             ${
               live?.ash_clean_needed
-                ? html`<span class="maint-badge">${this._t("OPRÓŻNIJ!", "EMPTY!")}</span>`
+                ? html`<span class="maint-badge">${this._t("PEŁNY!", "FULL!")}</span>`
                 : nothing
             }
           </div>
@@ -565,7 +507,7 @@ export class RsAnalyticsHeatPlants extends LitElement {
             ${formatNumber(ashDays, this.hass, 1)} / ${ashIntDays || "—"} d
             ${
               live?.estimated_ash_kg != null
-                ? ` · ~${formatNumber(live.estimated_ash_kg, this.hass, 1)} kg ${this._t("popiołu", "ash")}`
+                ? ` · ~${formatNumber(live.estimated_ash_kg, this.hass, 2)} kg ${this._t("popiołu", "ash")}`
                 : ""
             }
           </div>
@@ -575,24 +517,15 @@ export class RsAnalyticsHeatPlants extends LitElement {
               style="width: ${Math.max(2, ashPct)}%"
             ></div>
           </div>
-          <button
-            type="button"
-            class="maint-btn"
-            ?disabled=${this._busyAction === `${plant.id}:ash_cleaned`}
-            @click=${() => this._confirmMaintenance(plant.id, "ash_cleaned")}
-          >
-            <ha-icon icon="mdi:broom"></ha-icon>
-            ${this._t("Opróżniono popielnik", "Ash tray emptied")}
-          </button>
         </div>
 
         <div class="maint-card ${live?.chimney_clean_needed ? "warn" : ""}">
           <div class="maint-head">
             <ha-icon icon="mdi:chimney"></ha-icon>
-            <span>${this._t("Czyszczenie komina", "Chimney cleaning")}</span>
+            <span>${this._t("Zużycie komina (ciągłe)", "Chimney wear (continuous)")}</span>
             ${
               live?.chimney_clean_needed
-                ? html`<span class="maint-badge">${this._t("WYCZYŚĆ!", "CLEAN!")}</span>`
+                ? html`<span class="maint-badge">${this._t("WYMAGANE!", "DUE!")}</span>`
                 : nothing
             }
           </div>
@@ -606,59 +539,7 @@ export class RsAnalyticsHeatPlants extends LitElement {
               style="width: ${Math.max(2, chimPct)}%"
             ></div>
           </div>
-          <button
-            type="button"
-            class="maint-btn"
-            ?disabled=${this._busyAction === `${plant.id}:chimney_cleaned`}
-            @click=${() => this._confirmMaintenance(plant.id, "chimney_cleaned")}
-          >
-            <ha-icon icon="mdi:brush"></ha-icon>
-            ${this._t("Wyczyszczono komin", "Chimney cleaned")}
-          </button>
         </div>
-      </div>
-    `;
-  }
-
-  private _renderFuelLogBar(plant: HeatPlantConfig) {
-    if (
-      plant.fuel_type !== "coal" &&
-      plant.fuel_type !== "pellet" &&
-      plant.fuel_type !== "wood"
-    )
-      return nothing;
-    return html`
-      <div class="fuel-log-bar">
-        <span class="fuel-log-label">
-          <ha-icon icon="mdi:weight-kilogram"></ha-icon>
-          ${this._t("Szybki wpis opału (kg):", "Quick fuel log (kg):")}
-        </span>
-        <input
-          type="number"
-          min="0.5"
-          max="5000"
-          step="1"
-          .value=${String(this._fuelInputKg)}
-          @input=${(e: Event) => {
-            this._fuelInputKg = Number((e.target as HTMLInputElement).value);
-          }}
-        />
-        <button
-          type="button"
-          class="fuel-btn primary"
-          ?disabled=${!!this._busyAction}
-          @click=${() => this._logFuel(plant.id, "refill")}
-        >
-          ${this._t("+ Dosyp do zasobnika", "+ Refill hopper")}
-        </button>
-        <button
-          type="button"
-          class="fuel-btn"
-          ?disabled=${!!this._busyAction}
-          @click=${() => this._logFuel(plant.id, "burned")}
-        >
-          ${this._t("+ Zapisz spalone (kg)", "+ Log burned (kg)")}
-        </button>
       </div>
     `;
   }

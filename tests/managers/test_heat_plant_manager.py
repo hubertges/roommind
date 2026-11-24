@@ -247,13 +247,18 @@ async def test_non_extinguishable_coal_boiler_and_fireplace_fire_hold(hass):
         for _, srv, data in calls
     )
 
-    # Advance 30 min in fire-hold -> standby burn should still accumulate at min_power_pct
+    # Advance 30 min in fire-hold -> standby burn should still accumulate at min_power_pct,
+    # and hopper/ash/chimney counters automatically advance with elapsed time without clicking refill!
     mgr._states["coal_hold"].last_ts -= 1800.0
     live_map = await mgr.async_process(rooms, idle_states, settings)
     live = live_map["coal_hold"]
     assert live["state"] == "hold"
     assert live["current_thermal_kw"] == pytest.approx(15.0 * 0.12, rel=1e-2)
     assert live["fuel_consumed_today"] > 0.1
+    assert live["fuel_since_refill_kg"] == pytest.approx(live["fuel_consumed_today"], rel=1e-2)
+    assert live["fuel_since_ash_clean_kg"] == pytest.approx(live["fuel_consumed_today"], rel=1e-2)
+    assert live["estimated_ash_kg"] > 0.0
+    assert live["fuel_remaining_kg"] < 100.0
 
     # Fireplace also defaults to cannot_extinguish=True: idle when cold/unlit, fire-hold when lit (warm flue)
     fp_flue = "sensor.fp_flue_test"

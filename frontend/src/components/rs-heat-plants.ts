@@ -1073,7 +1073,14 @@ export class RsHeatPlants extends LitElement {
 
     return html`
       <div class="fuel-log-row">
-        <span><b>${this._t("Rejestr opału (kg):", "Manual fuel log (kg):")}</b></span>
+        <span>
+          <b
+            >${this._t(
+              "Auto-kalkulacja 24/7 aktywna (czas + temp. + moc pieca) · Ręczny zasyp:",
+              "24/7 auto-calculation active (time + temp + power) · Manual refill:",
+            )}</b
+          >
+        </span>
         <input
           class="fuel-log-input"
           type="number"
@@ -1094,14 +1101,14 @@ export class RsHeatPlants extends LitElement {
           class="preset-btn accent"
           @click=${() => this._onLogFuel(plant.id, kgInput, "refill")}
         >
-          + ${this._t("Zasyp / Dołóż do zasobnika", "Refill hopper")}
+          + ${this._t("Zasypano / Dołożono do zasobnika", "Refilled hopper")}
         </button>
         <button
           type="button"
           class="preset-btn"
           @click=${() => this._onLogFuel(plant.id, kgInput, "burned")}
         >
-          + ${this._t("Zapisz jako spalone (kg)", "Log as burned (kg)")}
+          + ${this._t("Korekta spalonego (+kg)", "Adjust burned (+kg)")}
         </button>
       </div>
 
@@ -1111,7 +1118,7 @@ export class RsHeatPlants extends LitElement {
           <div class="maint-head">
             <span class="maint-head-left">
               <ha-icon icon="mdi:silo"></ha-icon>
-              ${this._t("Zasobnik / Dołożenie opału", "Hopper / Refuel")}
+              ${this._t("Zasobnik (ubywa automatycznie w czasie)", "Hopper (auto-depletes over time)")}
             </span>
             <b>${formatNumber(remKg, this.hass, 1)} kg (${Math.round(hopperPct)}%)</b>
           </div>
@@ -1122,8 +1129,8 @@ export class RsHeatPlants extends LitElement {
             ></i>
           </div>
           <div class="metric-sub">
-            ${this._t("Spalono od zasypu", "Burned since refill")}:
-            ${formatNumber(live?.fuel_since_refill_kg ?? 0, this.hass, 1)} kg
+            ${this._t("Auto-spalono od zasypu", "Auto-burned since refill")}:
+            ${formatNumber(live?.fuel_since_refill_kg ?? 0, this.hass, 2)} kg
             ${
               live?.hours_until_refill != null
                 ? ` · ~${formatNumber(live.hours_until_refill, this.hass, 1)} h`
@@ -1136,7 +1143,7 @@ export class RsHeatPlants extends LitElement {
               class="preset-btn accent"
               @click=${() => this._onMaintenance(plant.id, "refill")}
             >
-              ${this._t("Dołożono do pełna", "Refilled to full")}
+              ${this._t("Zasypano zasobnik do pełna", "Hopper refilled to full")}
             </button>
           </div>
         </div>
@@ -1146,9 +1153,9 @@ export class RsHeatPlants extends LitElement {
           <div class="maint-head">
             <span class="maint-head-left">
               <ha-icon icon="mdi:delete-variant"></ha-icon>
-              ${this._t("Zbiornik na popiół", "Ash Container")}
+              ${this._t("Popielnik (zbiera się ciągle podczas palenia)", "Ash Tray (accumulates continuously)")}
             </span>
-            <b>${Math.round(ashPct)}% (~${formatNumber(live?.estimated_ash_kg ?? 0, this.hass, 1)} kg)</b>
+            <b>${Math.round(ashPct)}% (~${formatNumber(live?.estimated_ash_kg ?? 0, this.hass, 2)} kg)</b>
           </div>
           <div class="maint-bar">
             <i
@@ -1157,10 +1164,10 @@ export class RsHeatPlants extends LitElement {
             ></i>
           </div>
           <div class="metric-sub">
-            ${this._t("Spalono", "Burned")}:
-            ${formatNumber(live?.fuel_since_ash_clean_kg ?? 0, this.hass, 1)} /
+            ${this._t("Spalono od czyszczenia", "Burned since cleaning")}:
+            ${formatNumber(live?.fuel_since_ash_clean_kg ?? 0, this.hass, 2)} /
             ${plant.ash_clean_interval_kg ?? 150} kg ·
-            ${formatNumber(live?.days_since_ash_clean ?? 0, this.hass, 0)}
+            ${formatNumber(live?.days_since_ash_clean ?? 0, this.hass, 1)}
             ${this._t("dni", "days")}
           </div>
           <div class="maint-actions">
