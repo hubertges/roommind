@@ -404,14 +404,17 @@ export class RsDeviceSection extends LitElement {
   private _deviceSummary(device: DeviceConfig): string {
     const l = this.hass.language;
     const parts: string[] = [localize(device.type === "trv" ? "card.thermostat" : "card.ac", l)];
-    if (device.type === "trv" && this._heatingSystemType) {
-      parts.push(
-        this._heatingSystemType === "radiator"
-          ? localize("devices.system_type_radiator", l)
-          : this._heatingSystemType === "underfloor"
-            ? localize("devices.system_type_underfloor", l)
-            : this._heatingSystemType,
-      );
+    if (device.type === "trv") {
+      const hst = device.heating_system_type || this._heatingSystemType;
+      if (hst) {
+        parts.push(
+          hst === "radiator"
+            ? localize("devices.system_type_radiator", l)
+            : hst === "underfloor"
+              ? localize("devices.system_type_underfloor", l)
+              : hst,
+        );
+      }
     }
     if (device.idle_action === "fan_only") {
       parts.push(
@@ -809,12 +812,43 @@ export class RsDeviceSection extends LitElement {
         ${hasSensor ? nothing : html`<p class="note">${localize("devices.managed_note", l)}</p>`}
       </div>
 
+      ${isTrv ? this._renderDeviceEmitterTypeGroup(device) : nothing}
       ${hasSensor && !hasValve ? this._renderControlGroup(device) : nothing}
       ${this._renderIdleGroup(device)}
       ${isTrv && (showValve || this.valveProtectionEnabled) ? this._renderValveGroup(device) : nothing}
       ${device.type === "ac" ? this._renderCoilDryGroup(device) : nothing}
       <div class="group">${this._renderRemove(device)}</div>
     `;
+  }
+
+  private _renderDeviceEmitterTypeGroup(device: DeviceConfig) {
+    const l = this.hass.language;
+    const id = device.entity_id;
+    const hst = device.heating_system_type ?? this._heatingSystemType ?? "";
+    return html`<div class="group">
+      <h4 class="group-title">
+        ${localize("devices.heating_system_type", l)}
+        <rs-info-icon .text=${localize("devices.heating_system_type_info", l)}></rs-info-icon>
+      </h4>
+      ${this._choice(
+        localize("devices.heating_system_type", l),
+        [
+          { value: "", label: localize("devices.system_type_none", l) },
+          {
+            value: "radiator",
+            label: localize("devices.system_type_radiator", l),
+            icon: "mdi:radiator",
+          },
+          {
+            value: "underfloor",
+            label: localize("devices.system_type_underfloor", l),
+            icon: "mdi:waves",
+          },
+        ],
+        hst,
+        (v) => this._onSingleDeviceHeatingSystemTypeChange(id, v),
+      )}
+    </div>`;
   }
 
   private _renderControlGroup(device: DeviceConfig) {
@@ -1650,6 +1684,14 @@ export class RsDeviceSection extends LitElement {
     this._showBoostHint = true;
     const newDevices = this.devices.map((d) =>
       d.type === "trv" ? { ...d, heating_system_type: value } : d,
+    );
+    this._fireDeviceChanged(newDevices);
+  }
+
+  private _onSingleDeviceHeatingSystemTypeChange(entityId: string, value: string) {
+    this._showBoostHint = true;
+    const newDevices = this.devices.map((d) =>
+      d.entity_id === entityId && d.type === "trv" ? { ...d, heating_system_type: value } : d,
     );
     this._fireDeviceChanged(newDevices);
   }

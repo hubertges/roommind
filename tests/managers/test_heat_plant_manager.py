@@ -272,11 +272,10 @@ async def test_non_extinguishable_coal_boiler_and_fireplace_fire_hold(hass):
 
 
 @pytest.mark.asyncio
-async def test_multi_source_fireplace_boiler_and_underfloor_manifold(hass):
-    """Fireplace (priority 1) assists boiler (priority 2); underfloor manifold propagates demand to parent boiler."""
+async def test_multi_source_fireplace_boiler_and_underfloor_receiver_circuit(hass):
+    """Fireplace (priority 1) assists boiler (priority 2); boiler drives both radiators and an underfloor receiver circuit."""
     from custom_components.roommind.managers.heat_plant_manager import (
         PLANT_TYPE_FIREPLACE,
-        PLANT_TYPE_UNDERFLOOR,
     )
 
     bath = "bathroom_1"
@@ -288,7 +287,13 @@ async def test_multi_source_fireplace_boiler_and_underfloor_manifold(hass):
         ufh_pump: SimpleNamespace(state="off", attributes={}),
     }
     hass.states.get = states.get
-    hass.services.async_call = AsyncMock()
+
+    async def _call(domain, service, data, **_kw):
+        eid = data.get("entity_id")
+        if eid in states and service in ("turn_on", "turn_off"):
+            states[eid].state = "on" if service == "turn_on" else "off"
+
+    hass.services.async_call = AsyncMock(side_effect=_call)
 
     mgr = HeatPlantManager(hass)
     plants = [
@@ -308,24 +313,30 @@ async def test_multi_source_fireplace_boiler_and_underfloor_manifold(hass):
             "plant_type": PLANT_TYPE_COAL_BOILER,
             "enabled": True,
             "priority": 2,
-            "assigned_rooms": [AREA],
+            "assigned_rooms": [AREA, bath],
             "supply_temp_sensor": SUPPLY_SENSOR,
+            "ufh_pump_entity": ufh_pump,
+            "ufh_min_supply_temp": 25.0,
+            "ufh_max_supply_temp": 48.0,
             "nominal_power_kw": 15.0,
         },
-        {
-            "id": "ufh_1",
-            "name": "Podłogówka",
-            "plant_type": PLANT_TYPE_UNDERFLOOR,
-            "enabled": True,
-            "priority": 3,
-            "parent_plant_id": "coal_1",
-            "assigned_rooms": [bath],
-            "ch_pump_entity": ufh_pump,
-            "ch_pump_min_supply_temp": 25.0,
-            "supply_temp_sensor": SUPPLY_SENSOR,
-        },
     ]
-    rooms = {AREA: SAMPLE_ROOM, bath: {**SAMPLE_ROOM, "area_id": bath}}
+    rooms = {
+        AREA: SAMPLE_ROOM,
+        bath: {
+            **SAMPLE_ROOM,
+            "area_id": bath,
+            "heating_system_type": "underfloor",
+            "devices": [
+                {
+                    "entity_id": "climate.bath_ufh",
+                    "type": "trv",
+                    "role": "auto",
+                    "heating_system_type": "underfloor",
+                }
+            ],
+        },
+    }
 
     # Case 1: Only AREA wants heat, fireplace is hot (185°C flue) -> fireplace handles AREA, boiler stays in fire-hold
     rs_living_only = {
@@ -338,14 +349,12 @@ async def test_multi_source_fireplace_boiler_and_underfloor_manifold(hass):
     assert live["coal_1"]["heating_demand"] is False
     assert live["coal_1"]["state"] == "hold"
 
-    # Case 2: Bathroom (on underfloor manifold) demands heat -> child loop wakes parent boiler!
+    # Case 2: Bathroom (with underfloor heating receiver) demands heat -> wakes boiler!
     rs_bath = {
         AREA: {"mode": MODE_IDLE, "commanded_mode": MODE_IDLE, "heating_power": 0},
         bath: {"mode": MODE_HEATING, "commanded_mode": MODE_HEATING, "heating_power": 80},
     }
     live = await mgr.async_process(rooms, rs_bath, {"climate_control_active": True, "heat_plants": plants})
-    assert live["ufh_1"]["heating_demand"] is True
-    assert "Podłogówka" in live["coal_1"]["child_demands"]
     assert live["coal_1"]["heating_demand"] is True
     assert live["coal_1"]["state"] == "heating"
 
@@ -507,11 +516,9 @@ async def test_maintenance_alerts_notifications_and_confirmations(hass):
 
 
 @pytest.mark.asyncio
-async def test_underfloor_overheat_stops_pump_and_low_return_warning(hass):
-    """Underfloor manifold STOPS its pump on overheat (>=48°C) and sends alert; coal boiler flags cold return (<45°C)."""
+async def test_underfloor_receiver_overheat_stops_pump_and_low_return_warning(hass):
+    """Boiler's underfloor receiver circuit STOPS its UFH pump on overheat (>=48°C) and sends alert; coal boiler flags cold return (<45°C)."""
     from unittest.mock import patch
-
-    from custom_components.roommind.managers.heat_plant_manager import PLANT_TYPE_UNDERFLOOR
 
     ufh_pump = "switch.ufh_pump"
     ufh_supply = "sensor.ufh_supply"
@@ -533,15 +540,6 @@ async def test_underfloor_overheat_stops_pump_and_low_return_warning(hass):
     mgr = HeatPlantManager(hass)
     plants = [
         {
-            "id": "ufh_safe",
-            "name": "Podłogówka Parter",
-            "plant_type": PLANT_TYPE_UNDERFLOOR,
-            "enabled": True,
-            "assigned_rooms": [AREA],
-            "supply_temp_sensor": ufh_supply,
-            "ch_pump_entity": ufh_pump,
-        },
-        {
             "id": "coal_ret",
             "name": "Piec Ekogroszek",
             "plant_type": PLANT_TYPE_COAL_BOILER,
@@ -549,6 +547,10 @@ async def test_underfloor_overheat_stops_pump_and_low_return_warning(hass):
             "assigned_rooms": [AREA],
             "supply_temp_sensor": SUPPLY_SENSOR,
             "return_temp_sensor": RETURN_SENSOR,
+            "ufh_pump_entity": ufh_pump,
+            "ufh_supply_temp_sensor": ufh_supply,
+            "ufh_min_supply_temp": 25.0,
+            "ufh_max_supply_temp": 48.0,
         },
     ]
     rooms = {AREA: SAMPLE_ROOM}
@@ -568,9 +570,10 @@ async def test_underfloor_overheat_stops_pump_and_low_return_warning(hass):
     ):
         live = await mgr.async_process(rooms, rs, settings)
 
-    # Underfloor manifold at 51°C (>= 48°C default) must CUT its pump OFF and dispatch overheat alarm
-    assert live["ufh_safe"]["overheat_protect"] is True
-    assert live["ufh_safe"]["ch_pump_active"] is False
+    # Underfloor receiver circuit at 51°C (>= 48°C default) must CUT its UFH pump OFF and dispatch overheat alarm
+    assert live["coal_ret"]["ufh_overheat_protect"] is True
+    assert live["coal_ret"]["overheat_protect"] is True
+    assert live["coal_ret"]["ufh_pump_active"] is False
     assert states[ufh_pump].state == "off"
     assert mock_send.await_count == 1
     assert "podłogówki" in mock_send.await_args.kwargs["message"].lower()
@@ -578,14 +581,18 @@ async def test_underfloor_overheat_stops_pump_and_low_return_warning(hass):
     # Coal boiler at 62°C supply / 39°C return flags low_return_warning
     assert live["coal_ret"]["low_return_warning"] is True
 
-    # Raising return to 48°C clears low_return_warning
+    # Raising return to 48°C and cooling UFH supply to 35°C clears both warnings and starts UFH pump
     states[RETURN_SENSOR].state = "48.0"
+    states[ufh_supply].state = "35.0"
     with (
         patch("custom_components.roommind.managers.heat_plant_manager.async_send_notification", new=AsyncMock()),
         patch("custom_components.roommind.managers.heat_plant_manager.dismiss_notification"),
     ):
         live2 = await mgr.async_process(rooms, rs, settings)
     assert live2["coal_ret"]["low_return_warning"] is False
+    assert live2["coal_ret"]["ufh_overheat_protect"] is False
+    assert live2["coal_ret"]["ufh_pump_active"] is True
+    assert states[ufh_pump].state == "on"
 
 
 @pytest.mark.asyncio

@@ -209,7 +209,6 @@ export type HeatPlantType =
   | "pellet_boiler"
   | "wood_boiler"
   | "fireplace"
-  | "underfloor_manifold"
   | "gas_boiler"
   | "electric_heater"
   | "air_heater"
@@ -240,6 +239,10 @@ export interface HeatPlantConfig {
   ch_pump_entity: string;
   ch_pump_min_supply_temp: number;
   ch_pump_overrun_temp: number;
+  ufh_pump_entity?: string;
+  ufh_supply_temp_sensor?: string;
+  ufh_min_supply_temp?: number;
+  ufh_max_supply_temp?: number;
   dhw_pump_entity: string;
   dhw_target_temp: number;
   dhw_hysteresis: number;
@@ -292,14 +295,18 @@ export interface HeatPlantLive {
   heating_demand: boolean;
   dhw_demand: boolean;
   overheat_protect: boolean;
+  ufh_overheat_protect?: boolean;
   low_return_warning?: boolean;
   supply_temp: number | null;
   return_temp: number | null;
+  ufh_supply_temp?: number | null;
   delta_t: number | null;
   dhw_temp: number | null;
   flue_temp: number | null;
   ch_pump_active: boolean;
   ch_pump_blocked_cold: boolean;
+  ufh_pump_active?: boolean;
+  ufh_pump_blocked_cold?: boolean;
   dhw_pump_active: boolean;
   dhw_pump_blocked_cold: boolean;
   demanding_rooms: string[];

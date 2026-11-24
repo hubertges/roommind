@@ -358,13 +358,11 @@ export class RsDashboard extends LitElement {
         const icon =
           plant.plant_type === "fireplace"
             ? "mdi:fireplace"
-            : plant.plant_type === "underfloor_manifold"
-              ? "mdi:waves"
-              : plant.plant_type === "heat_pump"
-                ? "mdi:heat-pump-outline"
-                : plant.plant_type === "gas_boiler"
-                  ? "mdi:water-boiler"
-                  : "mdi:fire";
+            : plant.plant_type === "heat_pump"
+              ? "mdi:heat-pump-outline"
+              : plant.plant_type === "gas_boiler"
+                ? "mdi:water-boiler"
+                : "mdi:fire";
         const stateLabel =
           !plant.enabled
             ? this._t("Wyłączony", "Disabled")

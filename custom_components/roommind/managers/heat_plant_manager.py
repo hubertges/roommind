@@ -1,16 +1,19 @@
-"""Heat plant manager: boilers (coal/pellet/wood/gas), fireplaces, underfloor manifolds, heaters, and heat pumps.
+"""Heat plant manager: boilers (coal/pellet/wood/gas), fireplaces, heaters, and heat pumps.
 
 Manages:
-- Multiple cooperating heat sources (e.g. ekogroszek coal boiler + fireplace + underfloor heating)
-  with priority handling and parent/child loop propagation (e.g. underfloor manifold fed by boiler).
+- Multiple cooperating heat sources (e.g. ekogroszek coal boiler + fireplace + heat pump)
+  with priority handling and parent/child source propagation.
 - Non-extinguishable solid-fuel safety ("cannot_extinguish"): coal boilers, wood boilers, and fireplaces
   are never commanded to completely turn off on normal idle; instead they transition to a safe
   fire-hold / ember-standby mode ("hold") with minimum power tracking and overheat heat-dumping.
-- Assigned radiators (TRVs), underfloor heating, heaters, and rooms per heat plant.
+- Assigned heat emitters / receivers — radiators (TRVs) and underfloor heating (podłogówka) — and rooms
+  driven by each heat source, plus an optional dedicated underfloor heating circuit (obieg podłogówki:
+  pump + supply thermometer + overheat cutoff) powered by the boiler/heat source.
 - Supply, return, DHW (CWU), and flue/buffer temperature monitoring + delta-T calculation.
 - Active control of the heat source entity (climate.*, water_heater.*, switch.*, fan.*, input_boolean.*)
-  and circulation pumps (C.O. central heating pump and CWU domestic hot water pump) with
-  minimum supply temperature protection, boiler overheat protection, and DHW differential hysteresis.
+  and circulation pumps (C.O. central heating pump, underfloor heating pump, and CWU domestic hot water pump)
+  with minimum supply temperature protection, boiler overheat protection, underfloor overheat cutoff,
+  and DHW differential hysteresis.
 - Fuel consumption in kg from: HA cumulative kg/g sensor, auger/feeder screw entity (podajnik) +
   kg/h throughput, manual kg entries, energy sensor, or calorific/power estimation.
 - Maintenance tracking & throttled notifications for:
@@ -51,7 +54,6 @@ PLANT_TYPE_COAL_BOILER = "coal_boiler"
 PLANT_TYPE_PELLET_BOILER = "pellet_boiler"
 PLANT_TYPE_WOOD_BOILER = "wood_boiler"
 PLANT_TYPE_FIREPLACE = "fireplace"
-PLANT_TYPE_UNDERFLOOR = "underfloor_manifold"
 PLANT_TYPE_GAS_BOILER = "gas_boiler"
 PLANT_TYPE_ELECTRIC_HEATER = "electric_heater"
 PLANT_TYPE_AIR_HEATER = "air_heater"
@@ -62,7 +64,6 @@ HEAT_PLANT_TYPES = (
     PLANT_TYPE_PELLET_BOILER,
     PLANT_TYPE_WOOD_BOILER,
     PLANT_TYPE_FIREPLACE,
-    PLANT_TYPE_UNDERFLOOR,
     PLANT_TYPE_GAS_BOILER,
     PLANT_TYPE_ELECTRIC_HEATER,
     PLANT_TYPE_AIR_HEATER,
@@ -122,7 +123,7 @@ def usable_kwh_per_kg(calorific_mj_kg: float, efficiency_pct: float) -> float:
 
 @dataclass
 class HeatPlantConfig:
-    """Configuration for a single boiler, fireplace, underfloor manifold, heater, or heat pump."""
+    """Configuration for a single boiler, fireplace, heater, or heat pump (heat source)."""
 
     id: str
     name: str
@@ -130,11 +131,11 @@ class HeatPlantConfig:
     enabled: bool = True
     # Multi-source coordination
     priority: int = 1  # Lower number = higher priority (e.g. 1 = fireplace, 2 = main boiler)
-    parent_plant_id: str = ""  # Optional parent heat plant feeding this loop (e.g. underfloor -> boiler)
+    parent_plant_id: str = ""  # Optional parent heat source
     # Non-extinguishable solid-fuel protection (fire-hold / podtrzymanie ognia)
     cannot_extinguish: bool = True
     min_power_pct: float = 12.0  # Ember/standby burn fraction [%] when fire is held
-    # Assigned radiator/TRV/UFH/AC climate entity IDs and/or room area_ids
+    # Assigned heat receivers/emitters (radiator TRVs, underfloor heating thermostats) and/or room area_ids
     assigned_devices: list[str] = field(default_factory=list)
     assigned_rooms: list[str] = field(default_factory=list)
     # Main heat source entity (climate.*, water_heater.*, switch.*, input_boolean.*, fan.*)
@@ -148,10 +149,15 @@ class HeatPlantConfig:
     return_temp_sensor: str = ""
     dhw_temp_sensor: str = ""
     flue_temp_sensor: str = ""
-    # Central heating (C.O.) circulation pump
+    # Central heating (C.O.) circulation pump (radiators / main circuit)
     ch_pump_entity: str = ""
     ch_pump_min_supply_temp: float = 40.0
     ch_pump_overrun_temp: float = 80.0
+    # Underfloor heating receiver circuit (obieg odbiornika podłogówki zasilany z tego pieca/źródła)
+    ufh_pump_entity: str = ""
+    ufh_supply_temp_sensor: str = ""
+    ufh_min_supply_temp: float = 25.0
+    ufh_max_supply_temp: float = 48.0  # Safety cutoff: stops UFH pump if supply exceeds this temp
     # Domestic hot water (CWU) loading pump
     dhw_pump_entity: str = ""
     dhw_target_temp: float = 50.0
@@ -197,7 +203,6 @@ class HeatPlantConfig:
             PLANT_TYPE_PELLET_BOILER: FUEL_TYPE_PELLET,
             PLANT_TYPE_WOOD_BOILER: FUEL_TYPE_WOOD,
             PLANT_TYPE_FIREPLACE: FUEL_TYPE_WOOD,
-            PLANT_TYPE_UNDERFLOOR: FUEL_TYPE_COAL,
             PLANT_TYPE_GAS_BOILER: FUEL_TYPE_GAS,
             PLANT_TYPE_ELECTRIC_HEATER: FUEL_TYPE_ELECTRICITY,
             PLANT_TYPE_AIR_HEATER: FUEL_TYPE_ELECTRICITY,
@@ -220,8 +225,6 @@ class HeatPlantConfig:
         }.get(fuel_type, 0.0)
 
         default_off_mode = "temperature" if cannot_extinguish else "off"
-        default_min_supply = 22.0 if plant_type == PLANT_TYPE_UNDERFLOOR else 40.0
-        default_overrun_temp = 48.0 if plant_type == PLANT_TYPE_UNDERFLOOR else 80.0
 
         return cls(
             id=str(data.get("id") or ""),
@@ -235,7 +238,7 @@ class HeatPlantConfig:
             assigned_devices=[str(x) for x in (data.get("assigned_devices") or []) if x],
             assigned_rooms=[str(x) for x in (data.get("assigned_rooms") or []) if x],
             source_entity=str(data.get("source_entity") or ""),
-            target_supply_temp=float(data.get("target_supply_temp", 35.0 if plant_type == PLANT_TYPE_UNDERFLOOR else 55.0) or 55.0),
+            target_supply_temp=float(data.get("target_supply_temp", 55.0) or 55.0),
             idle_supply_temp=float(
                 data.get("idle_supply_temp", 42.0 if cannot_extinguish else 35.0) or 35.0
             ),
@@ -246,8 +249,12 @@ class HeatPlantConfig:
             dhw_temp_sensor=str(data.get("dhw_temp_sensor") or ""),
             flue_temp_sensor=str(data.get("flue_temp_sensor") or ""),
             ch_pump_entity=str(data.get("ch_pump_entity") or ""),
-            ch_pump_min_supply_temp=float(data.get("ch_pump_min_supply_temp", default_min_supply) or 0.0),
-            ch_pump_overrun_temp=float(data.get("ch_pump_overrun_temp", default_overrun_temp) or default_overrun_temp),
+            ch_pump_min_supply_temp=float(data.get("ch_pump_min_supply_temp", 40.0) or 0.0),
+            ch_pump_overrun_temp=float(data.get("ch_pump_overrun_temp", 80.0) or 80.0),
+            ufh_pump_entity=str(data.get("ufh_pump_entity") or ""),
+            ufh_supply_temp_sensor=str(data.get("ufh_supply_temp_sensor") or ""),
+            ufh_min_supply_temp=float(data.get("ufh_min_supply_temp", 25.0) or 0.0),
+            ufh_max_supply_temp=float(data.get("ufh_max_supply_temp", 48.0) or 48.0),
             dhw_pump_entity=str(data.get("dhw_pump_entity") or ""),
             dhw_target_temp=float(data.get("dhw_target_temp", 50.0) or 50.0),
             dhw_hysteresis=max(0.5, float(data.get("dhw_hysteresis", 3.0) or 3.0)),
@@ -303,6 +310,10 @@ class HeatPlantConfig:
             "ch_pump_entity": self.ch_pump_entity,
             "ch_pump_min_supply_temp": self.ch_pump_min_supply_temp,
             "ch_pump_overrun_temp": self.ch_pump_overrun_temp,
+            "ufh_pump_entity": self.ufh_pump_entity,
+            "ufh_supply_temp_sensor": self.ufh_supply_temp_sensor,
+            "ufh_min_supply_temp": self.ufh_min_supply_temp,
+            "ufh_max_supply_temp": self.ufh_max_supply_temp,
             "dhw_pump_entity": self.dhw_pump_entity,
             "dhw_target_temp": self.dhw_target_temp,
             "dhw_hysteresis": self.dhw_hysteresis,
@@ -1300,6 +1311,11 @@ class HeatPlantManager:
             return_temp = self._read_temp_celsius(plant.return_temp_sensor, "return temperature")
             dhw_temp = self._read_temp_celsius(plant.dhw_temp_sensor, "DHW temperature")
             flue_temp = self._read_temp_celsius(plant.flue_temp_sensor, "flue temperature")
+            ufh_supply_temp = (
+                self._read_temp_celsius(plant.ufh_supply_temp_sensor, "underfloor supply temperature")
+                if plant.ufh_supply_temp_sensor
+                else supply_temp
+            )
 
             delta_t = (
                 round(supply_temp - return_temp, 1)
@@ -1338,6 +1354,23 @@ class HeatPlantManager:
                 mean_pf = 0.6
                 max_pf = max(max_pf, 0.6)
 
+            # Determine if any demanding room or active device on this heat plant is an underfloor receiver
+            ufh_demand = False
+            if heating_demand:
+                active_dev_set = set(active_devices)
+                for aid in demanding_rooms:
+                    rm = rooms.get(aid) or {}
+                    if rm.get("heating_system_type") == "underfloor":
+                        ufh_demand = True
+                        break
+                    for dev in rm.get("devices", []):
+                        if dev.get("entity_id") in active_dev_set and dev.get("heating_system_type") == "underfloor":
+                            ufh_demand = True
+                            break
+                if not ufh_demand and plant.ufh_pump_entity:
+                    # If a dedicated UFH pump is configured on this heat plant, run it on heating demand
+                    ufh_demand = True
+
             # Evaluate DHW (CWU) demand with hysteresis
             if plant.dhw_temp_sensor and dhw_temp is not None and math.isfinite(dhw_temp):
                 if dhw_temp < plant.dhw_target_temp - plant.dhw_hysteresis:
@@ -1350,28 +1383,43 @@ class HeatPlantManager:
             dhw_demand = st.dhw_charging and bool(plant.dhw_pump_entity or plant.dhw_temp_sensor)
 
             # Overheat protection:
-            # - Boilers / fireplaces: supply >= ch_pump_overrun_temp (default 80°C) -> force C.O. & DHW dump pumps ON
-            # - Underfloor manifold: supply >= ch_pump_overrun_temp (default 48°C) -> STOP UFH pump to protect floor!
+            # - Boiler / fireplace overheat: supply >= ch_pump_overrun_temp (default 80°C) -> force C.O. & DHW dump pumps ON
+            # - Underfloor receiver circuit overheat: ufh_supply_temp >= ufh_max_supply_temp (default 48°C) -> STOP UFH pump to protect floor!
             overheat_protect = (
                 supply_temp is not None
                 and plant.ch_pump_overrun_temp > 0
                 and supply_temp >= plant.ch_pump_overrun_temp
             )
+            ufh_overheat_protect = bool(
+                (plant.ufh_pump_entity or plant.ufh_supply_temp_sensor)
+                and ufh_supply_temp is not None
+                and plant.ufh_max_supply_temp > 0
+                and ufh_supply_temp >= plant.ufh_max_supply_temp
+            )
 
-            # C.O. / UFH pump logic
+            # C.O. radiator pump logic
             supply_warm_for_ch = (
                 supply_temp is None
                 or plant.ch_pump_min_supply_temp <= 0
                 or supply_temp >= plant.ch_pump_min_supply_temp
             )
-            if plant.plant_type == PLANT_TYPE_UNDERFLOOR:
-                ch_pump_wanted = (
-                    not overheat_protect and plant.enabled and heating_demand and supply_warm_for_ch
-                )
-            else:
-                ch_pump_wanted = overheat_protect or (
-                    plant.enabled and heating_demand and supply_warm_for_ch
-                )
+            ch_pump_wanted = overheat_protect or (
+                plant.enabled and heating_demand and supply_warm_for_ch
+            )
+
+            # Underfloor heating receiver circuit pump logic (stops immediately if UFH supply exceeds max!)
+            supply_warm_for_ufh = (
+                ufh_supply_temp is None
+                or plant.ufh_min_supply_temp <= 0
+                or ufh_supply_temp >= plant.ufh_min_supply_temp
+            )
+            ufh_pump_wanted = (
+                bool(plant.ufh_pump_entity)
+                and not ufh_overheat_protect
+                and plant.enabled
+                and ufh_demand
+                and supply_warm_for_ufh
+            )
 
             # CWU pump logic: run when (dhw_demand and supply warmer than DHW + delta) OR emergency heat dump
             supply_warm_for_dhw = (
@@ -1381,7 +1429,6 @@ class HeatPlantManager:
             )
             dhw_overheat_dump = (
                 overheat_protect
-                and plant.plant_type != PLANT_TYPE_UNDERFLOOR
                 and (dhw_temp is None or dhw_temp < 70.0)
             )
             dhw_pump_wanted = (plant.enabled and dhw_demand and supply_warm_for_dhw) or dhw_overheat_dump
@@ -1403,30 +1450,23 @@ class HeatPlantManager:
                 )
                 if plant.ch_pump_entity:
                     await self._async_set_switch_like(plant.ch_pump_entity, ch_pump_wanted)
+                if plant.ufh_pump_entity:
+                    await self._async_set_switch_like(plant.ufh_pump_entity, ufh_pump_wanted)
                 if plant.dhw_pump_entity:
                     await self._async_set_switch_like(plant.dhw_pump_entity, dhw_pump_wanted)
 
-            # Immediate HA notification on overheat (short 10-min safety cooldown)
+            # Immediate HA notification on boiler overheat or underfloor circuit overheat (10-min safety cooldown)
             if settings.get("heat_plant_notifications_enabled", True):
                 overheat_targets = settings.get("heat_plant_notification_targets") or settings.get(
                     "mold_notification_targets", []
                 )
                 plant_label = plant.name or plant.id
-                if plant.plant_type == PLANT_TYPE_UNDERFLOOR:
-                    overheat_msg = (
-                        f"{plant_label}: zbyt wysoka temperatura zasilania podłogówki "
-                        f"({supply_temp:.1f}°C >= {plant.ch_pump_overrun_temp:.0f}°C)! "
-                        "Pompa podłogówki została awaryjnie zatrzymana."
-                        if supply_temp is not None
-                        else f"{plant_label}: alarm przegrzania podłogówki!"
-                    )
-                else:
-                    overheat_msg = (
-                        f"{plant_label}: przegrzanie kotła/źródła ({supply_temp:.1f}°C >= "
-                        f"{plant.ch_pump_overrun_temp:.0f}°C)! Wymuszono zrzut ciepła pompami C.O."
-                        if supply_temp is not None
-                        else f"{plant_label}: alarm przegrzania kotła!"
-                    )
+                overheat_msg = (
+                    f"{plant_label}: przegrzanie kotła/źródła ({supply_temp:.1f}°C >= "
+                    f"{plant.ch_pump_overrun_temp:.0f}°C)! Wymuszono zrzut ciepła pompami C.O."
+                    if supply_temp is not None
+                    else f"{plant_label}: alarm przegrzania kotła!"
+                )
                 await self._dispatch_maintenance_alert(
                     key=f"overheat_{pid}",
                     notif_id=f"{NOTIF_PLANT_PREFIX}{pid}_overheat",
@@ -1436,6 +1476,22 @@ class HeatPlantManager:
                     title=f"RoomMind: ALARM PRZEGRZANIA — {plant_label}",
                     message=overheat_msg,
                 )
+                ufh_overheat_msg = (
+                    f"{plant_label}: zbyt wysoka temperatura zasilania obiegu podłogówki "
+                    f"({ufh_supply_temp:.1f}°C >= {plant.ufh_max_supply_temp:.0f}°C)! "
+                    "Pompa podłogówki została awaryjnie zatrzymana."
+                    if ufh_supply_temp is not None
+                    else f"{plant_label}: alarm przegrzania obiegu podłogówki!"
+                )
+                await self._dispatch_maintenance_alert(
+                    key=f"ufh_overheat_{pid}",
+                    notif_id=f"{NOTIF_PLANT_PREFIX}{pid}_ufh_overheat",
+                    active=ufh_overheat_protect,
+                    cooldown_s=600.0,
+                    targets=overheat_targets,
+                    title=f"RoomMind: OCHRONA PODŁOGÓWKI — {plant_label}",
+                    message=ufh_overheat_msg,
+                )
 
             # Read actual states of source and pumps
             ch_pump_state = self.hass.states.get(plant.ch_pump_entity) if plant.ch_pump_entity else None
@@ -1443,6 +1499,12 @@ class HeatPlantManager:
                 ch_pump_state.state == "on"
                 if ch_pump_state is not None
                 else bool(ch_pump_wanted and plant.ch_pump_entity)
+            )
+            ufh_pump_state = self.hass.states.get(plant.ufh_pump_entity) if plant.ufh_pump_entity else None
+            ufh_pump_on = (
+                ufh_pump_state.state == "on"
+                if ufh_pump_state is not None
+                else bool(ufh_pump_wanted and plant.ufh_pump_entity)
             )
             dhw_pump_state = self.hass.states.get(plant.dhw_pump_entity) if plant.dhw_pump_entity else None
             dhw_pump_on = (
@@ -1493,7 +1555,7 @@ class HeatPlantManager:
                 and fire_alive
             )
 
-            if overheat_protect:
+            if overheat_protect or ufh_overheat_protect:
                 state_label = "overheat_protect"
             elif heating_demand and dhw_demand:
                 state_label = "heating_and_dhw"
@@ -1513,7 +1575,6 @@ class HeatPlantManager:
             if (
                 plant.enabled
                 and (source_active or heating_demand)
-                and plant.plant_type != PLANT_TYPE_UNDERFLOOR
                 and (supply_temp is None or supply_temp >= plant.ch_pump_min_supply_temp or (flue_temp is not None and flue_temp >= 80.0))
             ):
                 for aid in demanding_rooms:
@@ -1555,15 +1616,19 @@ class HeatPlantManager:
                 "source_active": source_active,
                 "heating_demand": heating_demand,
                 "dhw_demand": dhw_demand,
-                "overheat_protect": overheat_protect,
+                "overheat_protect": overheat_protect or ufh_overheat_protect,
+                "ufh_overheat_protect": ufh_overheat_protect,
                 "low_return_warning": low_return_warning,
                 "supply_temp": round(supply_temp, 1) if supply_temp is not None else None,
                 "return_temp": round(return_temp, 1) if return_temp is not None else None,
+                "ufh_supply_temp": round(ufh_supply_temp, 1) if (plant.ufh_supply_temp_sensor and ufh_supply_temp is not None) else None,
                 "delta_t": delta_t,
                 "dhw_temp": round(dhw_temp, 1) if dhw_temp is not None else None,
                 "flue_temp": round(flue_temp, 1) if flue_temp is not None else None,
                 "ch_pump_active": ch_pump_on,
                 "ch_pump_blocked_cold": bool(heating_demand and not supply_warm_for_ch),
+                "ufh_pump_active": ufh_pump_on,
+                "ufh_pump_blocked_cold": bool(ufh_demand and plant.ufh_pump_entity and not supply_warm_for_ufh),
                 "dhw_pump_active": dhw_pump_on,
                 "dhw_pump_blocked_cold": bool(dhw_demand and not supply_warm_for_dhw),
                 "demanding_rooms": demanding_rooms,

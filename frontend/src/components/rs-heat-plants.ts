@@ -1,11 +1,14 @@
 /**
  * rs-heat-plants – Dedicated tab for multiple heat sources:
- * boilers (ekogroszek/coal/pellet/wood/gas), fireplaces (kominek), underfloor heating manifolds (podłogówka),
- * air/water heaters, and heat pumps.
+ * boilers (ekogroszek/coal/pellet/wood/gas), fireplaces (kominek),
+ * air/water heaters, and heat pumps — which drive room heat emitters/receivers
+ * such as radiators (kaloryfery) and underfloor heating (podłogówka).
  *
  * Features:
- * - Multi-source priority & parent/child loop linking (e.g. underfloor manifold fed by boiler/fireplace).
+ * - Multi-source priority & parent/child source linking.
  * - Non-extinguishable solid-fuel safety ("cannot_extinguish"): fire-hold / podtrzymanie ognia mode.
+ * - Assigned heat receivers (radiators & underfloor heating loops) + optional dedicated underfloor
+ *   receiver circuit control (pump, supply thermometer, max-temperature floor safety cutoff).
  * - Fuel kg tracking via HA kg/g sensor, auger/feeder screw (podajnik), manual kg logging, or calorific estimation.
  * - Maintenance gauges, one-click confirmations, and HA notifications for:
  *   refueling (dołożenie opału), ash tray emptying (popielnik), and chimney cleaning (czyszczenie komina).
@@ -575,7 +578,6 @@ export class RsHeatPlants extends LitElement {
       pellet_boiler: ["Kocioł na pellet", "Pellet boiler"],
       wood_boiler: ["Kocioł drzewny / zgazowujący", "Wood boiler"],
       fireplace: ["Kominek / Płaszcz wodny", "Fireplace / Water jacket"],
-      underfloor_manifold: ["Ogrzewanie podłogowe (rozdzielacz)", "Underfloor heating manifold"],
       gas_boiler: ["Kocioł gazowy", "Gas boiler"],
       electric_heater: ["Kocioł / grzałka elektryczna", "Electric boiler"],
       air_heater: ["Nagrzewnica powietrzna / wodna", "Air / water heater"],
@@ -593,8 +595,6 @@ export class RsHeatPlants extends LitElement {
         return "mdi:fire";
       case "fireplace":
         return "mdi:fireplace";
-      case "underfloor_manifold":
-        return "mdi:waves";
       case "gas_boiler":
         return "mdi:water-boiler";
       case "air_heater":
@@ -603,6 +603,8 @@ export class RsHeatPlants extends LitElement {
         return "mdi:heat-pump-outline";
       case "electric_heater":
         return "mdi:heating-coil";
+      default:
+        return "mdi:fire";
     }
   }
 
@@ -634,8 +636,8 @@ export class RsHeatPlants extends LitElement {
           <h2>${this._t("Źródła ciepła i kotłownia", "Heat Sources & Boiler Room")}</h2>
           <p>
             ${this._t(
-              "Obsługa wielu źródeł ciepła (piec na ekogroszek, kominek, podłogówka, pompa ciepła), trybu podtrzymania ognia, spalania w kg oraz powiadomień konserwacyjnych.",
-              "Manage multiple heat sources (coal boiler, fireplace, underfloor heating, heat pump), fire-hold mode, kg fuel consumption, and maintenance notifications.",
+              "Obsługa źródeł zasilania cieplnego (piec na ekogroszek, kominek, kocioł gazowy, pompa ciepła) napędzających odbiorniki w pokojach (kaloryfery i ogrzewanie podłogowe), trybu podtrzymania ognia, spalania w kg oraz powiadomień konserwacyjnych.",
+              "Manage heat sources (coal boiler, fireplace, gas boiler, heat pump) driving room heat receivers (radiators and underfloor heating), fire-hold mode, kg fuel consumption, and maintenance notifications.",
             )}
           </p>
         </div>
@@ -659,10 +661,10 @@ export class RsHeatPlants extends LitElement {
           <button
             type="button"
             class="quick-add-btn"
-            @click=${() => this._onAddPlant("underfloor_manifold")}
+            @click=${() => this._onAddPlant("gas_boiler")}
           >
-            <ha-icon icon="mdi:waves"></ha-icon>
-            + ${this._t("Podłogówka", "Underfloor")}
+            <ha-icon icon="mdi:water-boiler"></ha-icon>
+            + ${this._t("Kocioł gazowy", "Gas boiler")}
           </button>
           <button
             type="button"
@@ -682,8 +684,8 @@ export class RsHeatPlants extends LitElement {
               <h3>${this._t("Brak skonfigurowanych źródeł ciepła", "No heat sources configured")}</h3>
               <p>
                 ${this._t(
-                  "Dodaj piec na ekogroszek, kominek, ogrzewanie podłogowe, kocioł gazowy lub pompę ciepła. Możesz dodać wiele źródeł ciepła naraz.",
-                  "Add a coal boiler, fireplace, underfloor heating, gas boiler, or heat pump. Multiple cooperating heat sources are supported.",
+                  "Dodaj piec na ekogroszek, kominek, kocioł na pellet/drewno/gaz lub pompę ciepła, które zasilają Twoje odbiorniki ciepła (kaloryfery oraz ogrzewanie podłogowe).",
+                  "Add a coal boiler, fireplace, pellet/wood/gas boiler, or heat pump that powers your heat receivers (radiators and underfloor heating).",
                 )}
               </p>
               <div class="quick-add-bar" style="justify-content: center; margin-top: 14px">
@@ -706,10 +708,10 @@ export class RsHeatPlants extends LitElement {
                 <button
                   type="button"
                   class="quick-add-btn"
-                  @click=${() => this._onAddPlant("underfloor_manifold")}
+                  @click=${() => this._onAddPlant("gas_boiler")}
                 >
-                  <ha-icon icon="mdi:waves"></ha-icon>
-                  + ${this._t("Dodaj podłogówkę", "Add underfloor")}
+                  <ha-icon icon="mdi:water-boiler"></ha-icon>
+                  + ${this._t("Dodaj kocioł gazowy", "Add gas boiler")}
                 </button>
               </div>
             </ha-card>`
@@ -885,6 +887,35 @@ export class RsHeatPlants extends LitElement {
         </div>
 
         ${
+          plant.ufh_pump_entity || plant.ufh_supply_temp_sensor
+            ? html`<div class="metric-tile">
+                <span class="metric-label">
+                  <ha-icon icon="mdi:waves"></ha-icon>
+                  ${this._t("Obieg podłogówki (odbiornik)", "Underfloor Receiver Circuit")}
+                </span>
+                <span class="metric-val">
+                  ${
+                    live?.ufh_overheat_protect
+                      ? this._t("Zatrzymana (przegrzanie!)", "Stopped (overheat!)")
+                      : plant.ufh_pump_entity
+                        ? live?.ufh_pump_active
+                          ? this._t("Pompa włączona", "Pump running")
+                          : this._t("Pompa wyłączona", "Pump off")
+                        : fmtTemp(live?.ufh_supply_temp)
+                  }
+                </span>
+                <span class="metric-sub">
+                  ${
+                    live?.ufh_supply_temp != null
+                      ? `${this._t("Zasilanie podłogówki", "UFH supply")}: ${fmtTemp(live.ufh_supply_temp)} · `
+                      : ""
+                  }${this._t("Maks.", "Max")} ${plant.ufh_max_supply_temp ?? 48}°C
+                </span>
+              </div>`
+            : nothing
+        }
+
+        ${
           plant.dhw_pump_entity
             ? html`<div class="metric-tile">
                 <span class="metric-label">
@@ -1008,13 +1039,13 @@ export class RsHeatPlants extends LitElement {
         ${isSolidFuel ? this._renderFuelLogAndMaintenance(plant, live) : nothing}
       </div>
 
-      <!-- Assigned Radiators & Heating Systems -->
+      <!-- Assigned Heat Receivers: Radiators & Underfloor Heating -->
       <div class="section-box">
         <div class="section-title">
           <span>
             ${this._t(
-              "Obsługiwane kaloryfery, podłogówka i pokoje",
-              "Served Radiators, Underfloor & Rooms",
+              "Zasilane odbiorniki ciepła (kaloryfery, podłogówka i pokoje)",
+              "Driven Heat Receivers (Radiators, Underfloor & Rooms)",
             )}
           </span>
           <span>
@@ -1187,15 +1218,18 @@ export class RsHeatPlants extends LitElement {
     for (const eid of plant.assigned_devices) {
       const heating = activeDevs.has(eid);
       const roomName = this._findRoomNameForDevice(eid);
+      const isUfh = this._isDeviceUnderfloor(eid);
       chips.push(html`
         <span
           class="dev-chip ${heating ? "heating" : ""}"
           @click=${() => openEntityInfo(this, eid)}
           style="cursor: pointer"
         >
-          <ha-icon icon=${heating ? "mdi:radiator" : "mdi:radiator-disabled"}></ha-icon>
+          <ha-icon
+            icon=${isUfh ? "mdi:waves" : heating ? "mdi:radiator" : "mdi:radiator-disabled"}
+          ></ha-icon>
           <span>${this._entityFriendlyName(eid)}</span>
-          ${roomName ? html`<small>(${roomName})</small>` : nothing}
+          ${roomName ? html`<small>(${roomName} · ${isUfh ? this._t("Podłogówka", "Underfloor") : this._t("Kaloryfer", "Radiator")})</small>` : nothing}
         </span>
       `);
     }
@@ -1272,7 +1306,6 @@ export class RsHeatPlants extends LitElement {
               .options=${[
                 { value: "coal_boiler", label: this._t("Piec ekogroszek", "Coal boiler") },
                 { value: "fireplace", label: this._t("Kominek", "Fireplace") },
-                { value: "underfloor_manifold", label: this._t("Podłogówka", "Underfloor") },
                 { value: "pellet_boiler", label: this._t("Pellet", "Pellet") },
                 { value: "wood_boiler", label: this._t("Kocioł drzewny", "Wood boiler") },
                 { value: "gas_boiler", label: this._t("Gazowy", "Gas") },
@@ -1364,14 +1397,20 @@ export class RsHeatPlants extends LitElement {
           </div>
         </section>
 
-        <!-- Assigned radiators & heating systems -->
+        <!-- Assigned heat receivers: radiators & underfloor heating -->
         <section class="group">
           <h4 class="group-title">
             ${this._t(
-              "Obsługiwane kaloryfery, ogrzewania podłogowe i pokoje",
-              "Served Radiators, Underfloor Heating & Rooms",
+              "Odbiorniki ciepła napędzane tym źródłem (kaloryfery, podłogówka i pokoje)",
+              "Heat Receivers Driven by This Source (Radiators, Underfloor & Rooms)",
             )}
           </h4>
+          <p class="note">
+            ${this._t(
+              "Kaloryfery (TRV) i ogrzewanie podłogowe to odbiorniki ciepła napędzane przez piec/źródło. Wybierz, które grzejniki, pętle podłogówki lub całe pokoje są zasilane z tego źródła.",
+              "Radiators (TRVs) and underfloor heating are heat receivers powered by this heat source. Select which radiators, underfloor loops, or rooms are fed by this source.",
+            )}
+          </p>
           <div class="radiator-list">
             ${allRoomDevices.map((item) => {
               const checked = draft.assigned_devices.includes(item.entityId);
@@ -1386,7 +1425,13 @@ export class RsHeatPlants extends LitElement {
                     )}
                 />
                 <ha-icon
-                  icon=${item.type === "ac" ? "mdi:heat-pump-outline" : "mdi:radiator"}
+                  icon=${
+                    item.isUnderfloor
+                      ? "mdi:waves"
+                      : item.type === "ac"
+                        ? "mdi:heat-pump-outline"
+                        : "mdi:radiator"
+                  }
                 ></ha-icon>
                 <span>${item.name}</span>
                 <span class="radiator-room">${item.roomName} · ${item.systemLabel}</span>
@@ -1417,8 +1462,8 @@ export class RsHeatPlants extends LitElement {
             .hass=${this.hass}
             .includeDomains=${["climate"]}
             .label=${this._t(
-              "Dodaj inny grzejnik / termostat (climate.*)",
-              "Add another radiator / thermostat (climate.*)",
+              "Dodaj inny odbiornik ciepła: kaloryfer / termostat podłogówki (climate.*)",
+              "Add another heat receiver: radiator / underfloor thermostat (climate.*)",
             )}
             .value=${""}
             @value-changed=${(e: CustomEvent) => {
@@ -1435,8 +1480,8 @@ export class RsHeatPlants extends LitElement {
         <section class="group">
           <h4 class="group-title">
             ${this._t(
-              "Sterowanie piecem / kominkiem / podłogówką",
-              "Boiler / Fireplace / Manifold Control Entity",
+              "Sterowanie źródłem ciepła (piec / kocioł / kominek / pompa ciepła)",
+              "Heat Source Control Entity (Boiler / Fireplace / Heat Pump)",
             )}
           </h4>
           <ha-entity-picker
@@ -1523,16 +1568,19 @@ export class RsHeatPlants extends LitElement {
           </div>
         </section>
 
-        <!-- Circulation Pumps: C.O. & CWU -->
+        <!-- Circulation Pumps: C.O. (radiators), Underfloor receiver circuit & CWU -->
         <section class="group">
           <h4 class="group-title">
-            ${this._t("Obsługa pomp obiegowych C.O. oraz CWU", "C.O. & DHW Circulation Pumps")}
+            ${this._t(
+              "Pompy obiegowe odbiorników (C.O. kaloryfery, obieg podłogówki) oraz CWU",
+              "Receiver Circulation Pumps (C.O. Radiators, Underfloor Circuit) & DHW",
+            )}
           </h4>
           <div class="pair">
             <ha-entity-picker
               .hass=${this.hass}
               .includeDomains=${["switch", "input_boolean", "fan"]}
-              .label=${this._t("Encja pompy obiegowej C.O.", "C.O. circulation pump entity")}
+              .label=${this._t("Encja pompy obiegowej C.O. (kaloryfery)", "C.O. circulation pump entity (radiators)")}
               .value=${draft.ch_pump_entity}
               @value-changed=${(e: CustomEvent) =>
                 this._updateDraft({ ch_pump_entity: (e.detail?.value as string) ?? "" })}
@@ -1558,7 +1606,7 @@ export class RsHeatPlants extends LitElement {
                 this._updateDraft({ ch_pump_min_supply_temp: e.detail.value })}
             ></rs-number-field>
             <rs-number-field
-              .label=${this._t("Awaryjny start pompy C.O. (przegrzanie)", "Overheat emergency C.O. pump temp")}
+              .label=${this._t("Awaryjny start pompy C.O. (przegrzanie kotła)", "Overheat emergency C.O. pump temp")}
               suffix="°C"
               .min=${45}
               .max=${99}
@@ -1588,6 +1636,63 @@ export class RsHeatPlants extends LitElement {
                 this._updateDraft({ dhw_hysteresis: e.detail.value })}
             ></rs-number-field>
           </div>
+
+          <div class="pair">
+            <ha-entity-picker
+              .hass=${this.hass}
+              .includeDomains=${["switch", "input_boolean", "fan"]}
+              .label=${this._t(
+                "Pompa obiegu podłogówki (opcjonalny odbiornik tego pieca)",
+                "Underfloor circuit pump (optional receiver driven by this boiler)",
+              )}
+              .value=${draft.ufh_pump_entity ?? ""}
+              @value-changed=${(e: CustomEvent) =>
+                this._updateDraft({ ufh_pump_entity: (e.detail?.value as string) ?? "" })}
+            ></ha-entity-picker>
+            <ha-entity-picker
+              .hass=${this.hass}
+              .includeDomains=${["sensor", "input_number"]}
+              .label=${this._t(
+                "Termometr zasilania za mieszaczem podłogówki (opcjonalnie)",
+                "Underfloor mixer supply temp sensor (optional)",
+              )}
+              .value=${draft.ufh_supply_temp_sensor ?? ""}
+              @value-changed=${(e: CustomEvent) =>
+                this._updateDraft({ ufh_supply_temp_sensor: (e.detail?.value as string) ?? "" })}
+            ></ha-entity-picker>
+          </div>
+          ${
+            draft.ufh_pump_entity || draft.ufh_supply_temp_sensor
+              ? html`<div class="pair">
+                  <rs-number-field
+                    .label=${this._t(
+                      "Start pompy podłogówki powyżej temp.",
+                      "Start UFH pump above supply temp",
+                    )}
+                    suffix="°C"
+                    .min=${15}
+                    .max=${50}
+                    .step=${1}
+                    .value=${draft.ufh_min_supply_temp ?? 25}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ ufh_min_supply_temp: e.detail.value })}
+                  ></rs-number-field>
+                  <rs-number-field
+                    .label=${this._t(
+                      "Maks. bezpieczna temp. podłogówki (wyłącza pompę!)",
+                      "Max safe UFH supply temp (stops UFH pump!)",
+                    )}
+                    suffix="°C"
+                    .min=${35}
+                    .max=${65}
+                    .step=${1}
+                    .value=${draft.ufh_max_supply_temp ?? 48}
+                    @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                      this._updateDraft({ ufh_max_supply_temp: e.detail.value })}
+                  ></rs-number-field>
+                </div>`
+              : nothing
+          }
         </section>
 
         <!-- Fuel, kg Counting, Feeder Screw & Costs -->
@@ -1934,6 +2039,7 @@ export class RsHeatPlants extends LitElement {
     name: string;
     roomName: string;
     type: string;
+    isUnderfloor: boolean;
     systemLabel: string;
   }[] {
     const list: {
@@ -1941,6 +2047,7 @@ export class RsHeatPlants extends LitElement {
       name: string;
       roomName: string;
       type: string;
+      isUnderfloor: boolean;
       systemLabel: string;
     }[] = [];
     const seen = new Set<string>();
@@ -1968,17 +2075,19 @@ export class RsHeatPlants extends LitElement {
       for (const d of devs) {
         if (!d.entity_id || seen.has(d.entity_id)) continue;
         seen.add(d.entity_id);
-        const sys =
-          d.heating_system_type === "underfloor"
-            ? this._t("Podłogówka", "Underfloor")
-            : d.type === "ac"
-              ? this._t("Klimatyzator / PC", "AC / Heat pump")
-              : this._t("Kaloryfer (TRV)", "Radiator (TRV)");
+        const isUfh =
+          d.heating_system_type === "underfloor" || room.heating_system_type === "underfloor";
+        const sys = isUfh
+          ? this._t("Odbiornik: Podłogówka", "Receiver: Underfloor")
+          : d.type === "ac"
+            ? this._t("Klimatyzator / PC", "AC / Heat pump")
+            : this._t("Odbiornik: Kaloryfer (TRV)", "Receiver: Radiator (TRV)");
         list.push({
           entityId: d.entity_id,
           name: this._entityFriendlyName(d.entity_id),
           roomName,
           type: d.type,
+          isUnderfloor: isUfh,
           systemLabel: sys,
         });
       }
@@ -1999,6 +2108,22 @@ export class RsHeatPlants extends LitElement {
     return "";
   }
 
+  private _isDeviceUnderfloor(entityId: string): boolean {
+    for (const room of Object.values(this.rooms)) {
+      for (const d of room.devices ?? []) {
+        if (d.entity_id === entityId) {
+          return (
+            d.heating_system_type === "underfloor" || room.heating_system_type === "underfloor"
+          );
+        }
+      }
+      if ((room.thermostats ?? []).includes(entityId) && room.heating_system_type === "underfloor") {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private _entityFriendlyName(entityId: string): string {
     return (
       (this.hass.states[entityId]?.attributes?.friendly_name as string | undefined) || entityId
@@ -2010,33 +2135,30 @@ export class RsHeatPlants extends LitElement {
     const allDevs = this._collectAllRoomHeatingDevices();
     const trvs = allDevs.filter((d) => d.type === "trv").map((d) => d.entityId);
     const isFireplace = presetType === "fireplace";
-    const isUnderfloor = presetType === "underfloor_manifold";
+    const isGas = presetType === "gas_boiler";
     const isCoal = presetType === "coal_boiler";
     const cannotExtinguish = isCoal || isFireplace || presetType === "wood_boiler";
-    const mainBoiler = this.heatPlants.find(
-      (p) => p.plant_type === "coal_boiler" || p.plant_type === "pellet_boiler" || p.plant_type === "gas_boiler",
-    );
 
     const newPlant: HeatPlantConfig = {
       id,
       name: isFireplace
         ? this._t("Kominek", "Fireplace")
-        : isUnderfloor
-          ? this._t("Ogrzewanie podłogowe", "Underfloor Heating")
+        : isGas
+          ? this._t("Kocioł gazowy", "Gas Boiler")
           : isCoal
             ? this._t("Piec Ekogroszek", "Coal Boiler")
             : this._t("Źródło ciepła", "Heat Source"),
       plant_type: presetType,
       enabled: true,
-      priority: isFireplace ? 1 : isUnderfloor ? 2 : this.heatPlants.length + 1,
-      parent_plant_id: isUnderfloor && mainBoiler ? mainBoiler.id : "",
+      priority: isFireplace ? 1 : this.heatPlants.length + 1,
+      parent_plant_id: "",
       cannot_extinguish: cannotExtinguish,
       min_power_pct: cannotExtinguish ? 12 : 0,
-      assigned_devices: isCoal ? trvs : [],
+      assigned_devices: isCoal || isGas ? trvs : [],
       assigned_rooms: [],
       source_entity: "",
-      target_supply_temp: isUnderfloor ? 35 : isFireplace ? 60 : 55,
-      idle_supply_temp: isUnderfloor ? 24 : cannotExtinguish ? 42 : 35,
+      target_supply_temp: isFireplace ? 60 : isGas ? 50 : 55,
+      idle_supply_temp: cannotExtinguish ? 42 : 30,
       off_mode: cannotExtinguish ? "temperature" : "off",
       min_rooms_demand: 1,
       supply_temp_sensor: "",
@@ -2044,23 +2166,29 @@ export class RsHeatPlants extends LitElement {
       dhw_temp_sensor: "",
       flue_temp_sensor: "",
       ch_pump_entity: "",
-      ch_pump_min_supply_temp: isUnderfloor ? 25 : presetType === "heat_pump" ? 20 : 40,
-      ch_pump_overrun_temp: isUnderfloor ? 50 : 80,
+      ch_pump_min_supply_temp: presetType === "heat_pump" ? 20 : isGas ? 30 : 40,
+      ch_pump_overrun_temp: 80,
+      ufh_pump_entity: "",
+      ufh_supply_temp_sensor: "",
+      ufh_min_supply_temp: 25,
+      ufh_max_supply_temp: 48,
       dhw_pump_entity: "",
       dhw_target_temp: 50,
       dhw_hysteresis: 3,
       dhw_min_supply_delta: 3,
       fuel_type: isFireplace
         ? "wood"
-        : presetType === "heat_pump"
-          ? "electricity"
-          : "coal",
+        : isGas
+          ? "gas"
+          : presetType === "heat_pump"
+            ? "electricity"
+            : "coal",
       calorific_value_mj_kg: isFireplace ? 14.5 : 26.0,
       calorific_value_kwh_m3: 10.5,
-      efficiency_pct: isFireplace ? 75 : isUnderfloor ? 95 : 85,
+      efficiency_pct: isFireplace ? 75 : isGas ? 96 : 85,
       cop: 3.5,
-      nominal_power_kw: isFireplace ? 12.0 : isUnderfloor ? 8.0 : 15.0,
-      fuel_price: isFireplace ? 600 : presetType === "heat_pump" ? 1.1 : 1500,
+      nominal_power_kw: isFireplace ? 12.0 : 15.0,
+      fuel_price: isFireplace ? 600 : isGas ? 3.5 : presetType === "heat_pump" ? 1.1 : 1500,
       currency: "PLN",
       energy_sensor: "",
       fuel_consumption_sensor: "",
@@ -2163,18 +2291,6 @@ export class RsHeatPlants extends LitElement {
         idle: 45,
         pumpMin: 40,
         overrun: 85,
-      },
-      underfloor_manifold: {
-        fuel: "coal",
-        mj: 26.0,
-        eff: 95,
-        price: 1500,
-        cannotExt: false,
-        ashPct: 0.0,
-        supply: 35,
-        idle: 24,
-        pumpMin: 25,
-        overrun: 50,
       },
       gas_boiler: {
         fuel: "gas",

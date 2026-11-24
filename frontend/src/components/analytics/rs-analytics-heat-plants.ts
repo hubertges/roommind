@@ -65,8 +65,6 @@ export class RsAnalyticsHeatPlants extends LitElement {
         return "mdi:fireplace-off";
       case "fireplace":
         return "mdi:fireplace";
-      case "underfloor_manifold":
-        return "mdi:heating-coil";
       case "gas_boiler":
         return "mdi:fire";
       case "heat_pump":
@@ -415,10 +413,18 @@ export class RsAnalyticsHeatPlants extends LitElement {
     }
     if (live?.ch_pump_active) {
       badges.push({
-        text:
-          plant.plant_type === "underfloor_manifold"
-            ? this._t("Pompa podłogówki ON", "UFH Pump ON")
-            : this._t("Pompa C.O. ON", "C.O. Pump ON"),
+        text: this._t("Pompa C.O. ON", "C.O. Pump ON"),
+      });
+    }
+    if (live?.ufh_pump_active) {
+      badges.push({
+        text: this._t("Pompa podłogówki ON", "UFH Pump ON"),
+      });
+    }
+    if (live?.ufh_overheat_protect) {
+      badges.push({
+        text: this._t("Ochrona podłogówki: pompa zatrzymana!", "UFH overheat cutoff!"),
+        warn: true,
       });
     }
     if (live?.dhw_pump_active) {
@@ -615,7 +621,12 @@ export class RsAnalyticsHeatPlants extends LitElement {
   }
 
   private _renderFuelLogBar(plant: HeatPlantConfig) {
-    if (plant.plant_type === "underfloor_manifold") return nothing;
+    if (
+      plant.fuel_type !== "coal" &&
+      plant.fuel_type !== "pellet" &&
+      plant.fuel_type !== "wood"
+    )
+      return nothing;
     return html`
       <div class="fuel-log-bar">
         <span class="fuel-log-label">
