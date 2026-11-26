@@ -1,8 +1,7 @@
 /**
- * rs-schedule-overview – Every Home Assistant schedule helper with the rooms that use it, in
- * two cards: room temperature and covers (helpers used only for covers). Each opens the
- * schedule editor in its kind; a helper no room uses lets the editor tell from its blocks.
- * Admins create schedules of either kind here, without a room.
+ * rs-schedule-overview – Every Home Assistant schedule helper with the rooms that use it,
+ * grouped by schedule kind: Heating/Temperature, AC (Cooling), Humidification, Ventilation, and Covers.
+ * Admins can create new schedules of any kind directly here.
  */
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -11,7 +10,7 @@ import { localize } from "../../utils/localize";
 import { isAdmin } from "../../utils/schedule-api";
 import { formatClock, haTimeZone, sameDayInZone } from "../../utils/analytics-time";
 import { openEntityInfo } from "../../utils/events";
-import { roomNameOf, usageText } from "../../utils/schedule-usage";
+import { roomNameOf, usageText, type ScheduleKind } from "../../utils/schedule-usage";
 import { tokens } from "../../styles/tokens";
 import "../shared/rs-list-card";
 import "../shared/rs-list-row";
@@ -22,8 +21,19 @@ interface ScheduleItem {
   entityId: string;
   name: string;
   rooms: string[];
+  acRooms: string[];
+  humidityRooms: string[];
+  ventilationRooms: string[];
   coverRooms: string[];
 }
+
+const KIND_ICON: Record<ScheduleKind, string> = {
+  climate: "mdi:calendar-clock",
+  ac: "mdi:snowflake",
+  humidity: "mdi:air-humidifier",
+  ventilation: "mdi:fan",
+  cover: "mdi:blinds",
+};
 
 @customElement("rs-schedule-overview")
 export class RsScheduleOverview extends LitElement {
@@ -31,7 +41,15 @@ export class RsScheduleOverview extends LitElement {
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
 
   @state() private _creating = false;
-  @state() private _createKind: "climate" | "cover" = "climate";
+  @state() private _createKind: ScheduleKind = "climate";
+
+  private get _isPl(): boolean {
+    return (this.hass?.language ?? "en").toLowerCase().startsWith("pl");
+  }
+
+  private _t(pl: string, en: string): string {
+    return this._isPl ? pl : en;
+  }
 
   private _items(): ScheduleItem[] {
     const lang = this.hass.language;
@@ -47,6 +65,13 @@ export class RsScheduleOverview extends LitElement {
           entityId,
           name: (this.hass.states[entityId].attributes?.friendly_name as string) || entityId,
           rooms: rooms.filter((r) => uses(r.schedules)).map((r) => roomName(r.area_id)),
+          acRooms: rooms.filter((r) => uses(r.ac_schedules)).map((r) => roomName(r.area_id)),
+          humidityRooms: rooms
+            .filter((r) => uses(r.humidity_schedules))
+            .map((r) => roomName(r.area_id)),
+          ventilationRooms: rooms
+            .filter((r) => uses(r.ventilation_schedules))
+            .map((r) => roomName(r.area_id)),
           coverRooms: rooms.filter((r) => uses(r.cover_schedules)).map((r) => roomName(r.area_id)),
         };
       })
@@ -56,22 +81,62 @@ export class RsScheduleOverview extends LitElement {
   render() {
     const l = this.hass.language;
     const items = this._items();
-    // Only for covers means not for the editor; a helper no room uses yet may become either
-    const covers = items.filter((i) => i.coverRooms.length && !i.rooms.length);
-    const rooms = items.filter((i) => !covers.includes(i));
+    const acOnly = items.filter((i) => i.acRooms.length && !i.rooms.length);
+    const humOnly = items.filter(
+      (i) => i.humidityRooms.length && !i.rooms.length && !acOnly.includes(i),
+    );
+    const ventOnly = items.filter(
+      (i) =>
+        i.ventilationRooms.length &&
+        !i.rooms.length &&
+        !acOnly.includes(i) &&
+        !humOnly.includes(i),
+    );
+    const covers = items.filter(
+      (i) =>
+        i.coverRooms.length &&
+        !i.rooms.length &&
+        !acOnly.includes(i) &&
+        !humOnly.includes(i) &&
+        !ventOnly.includes(i),
+    );
+    const special = new Set([...acOnly, ...humOnly, ...ventOnly, ...covers]);
+    const rooms = items.filter((i) => !special.has(i));
+
     return html`
       <rs-list-card .heading=${localize("schedules.rooms_title", l)}>
         ${
           rooms.length
-            ? rooms.map((i) => this._renderRow(i, false))
+            ? rooms.map((i) => this._renderRow(i, "climate"))
             : html`<p class="empty">${localize("schedules.empty", l)}</p>`
         }
         ${isAdmin(this.hass) ? this._renderCreate() : nothing}
       </rs-list-card>
       ${
+        acOnly.length
+          ? html`<rs-list-card .heading=${this._t("Klimatyzacja (AC)", "Air Conditioning (AC)")}>
+              ${acOnly.map((i) => this._renderRow(i, "ac"))}
+            </rs-list-card>`
+          : nothing
+      }
+      ${
+        humOnly.length
+          ? html`<rs-list-card .heading=${this._t("Nawilżanie i osuszanie", "Humidification & Dehumidification")}>
+              ${humOnly.map((i) => this._renderRow(i, "humidity"))}
+            </rs-list-card>`
+          : nothing
+      }
+      ${
+        ventOnly.length
+          ? html`<rs-list-card .heading=${this._t("Wentylacja / Rekuperacja", "Ventilation")}>
+              ${ventOnly.map((i) => this._renderRow(i, "ventilation"))}
+            </rs-list-card>`
+          : nothing
+      }
+      ${
         covers.length
           ? html`<rs-list-card .heading=${localize("schedules.covers_title", l)}>
-              ${covers.map((i) => this._renderRow(i, true))}
+              ${covers.map((i) => this._renderRow(i, "cover"))}
             </rs-list-card>`
           : nothing
       }
@@ -79,29 +144,30 @@ export class RsScheduleOverview extends LitElement {
     `;
   }
 
-  private _renderRow(item: ScheduleItem, cover: boolean) {
+  private _renderRow(item: ScheduleItem, kind: ScheduleKind) {
     const l = this.hass.language;
     const used = usageText(
       this.rooms,
       item.entityId,
-      cover ? "cover" : "climate",
+      kind,
       roomNameOf(this.rooms, this.hass.areas),
       l,
     );
     const on = this.hass.states[item.entityId]?.state === "on";
+    const openKind: "" | ScheduleKind =
+      kind === "climate" && !item.rooms.length ? "" : kind;
     return html`<rs-list-row
       clickable
       chevron
       wrap
-      icon=${cover ? "mdi:blinds" : "mdi:calendar-clock"}
+      icon=${KIND_ICON[kind]}
       icon-label=${localize("detail.more_info", l)}
       .iconColor=${on ? "var(--primary-color)" : ""}
       .heading=${item.name}
       .secondary=${[used || localize("schedules.unused", l), this._stateText(item.entityId)]
         .filter(Boolean)
         .join(" · ")}
-      @row-click=${() =>
-        this._open(item.entityId, cover ? "cover" : item.rooms.length ? "climate" : "")}
+      @row-click=${() => this._open(item.entityId, openKind)}
       @icon-click=${() => this._moreInfo(item.entityId)}
     ></rs-list-row>`;
   }
@@ -149,17 +215,22 @@ export class RsScheduleOverview extends LitElement {
             label: localize("schedules.kind_climate", l),
             icon: "mdi:thermometer",
           },
+          { value: "ac", label: this._t("Klimatyzacja", "AC"), icon: "mdi:snowflake" },
+          { value: "humidity", label: this._t("Nawilżanie", "Humidity"), icon: "mdi:air-humidifier" },
+          { value: "ventilation", label: this._t("Wentylacja", "Ventilation"), icon: "mdi:fan" },
           { value: "cover", label: localize("schedules.kind_cover", l), icon: "mdi:blinds" },
         ]}
         .value=${this._createKind}
-        @value-changed=${(e: CustomEvent<{ value: string }>) =>
-          (this._createKind = e.detail.value === "cover" ? "cover" : "climate")}
+        @value-changed=${(e: CustomEvent<{ value: string }>) => {
+          const v = e.detail.value as ScheduleKind;
+          if (v) this._createKind = v;
+        }}
       ></rs-segmented>
       <rs-schedule-create
         .hass=${this.hass}
         .kind=${this._createKind}
         @create-cancelled=${() => (this._creating = false)}
-        @schedule-created=${(e: CustomEvent<{ entityId: string; kind: "climate" | "cover" }>) => {
+        @schedule-created=${(e: CustomEvent<{ entityId: string; kind: ScheduleKind }>) => {
           this._creating = false;
           this._open(e.detail.entityId, e.detail.kind);
         }}
@@ -167,7 +238,7 @@ export class RsScheduleOverview extends LitElement {
     </div>`;
   }
 
-  private _open(entityId: string, kind: "" | "climate" | "cover") {
+  private _open(entityId: string, kind: "" | ScheduleKind) {
     this.dispatchEvent(
       new CustomEvent("open-schedule-editor", {
         detail: { entityId, areaId: "", kind },

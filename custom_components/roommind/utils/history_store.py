@@ -64,15 +64,26 @@ PLANT_DETAIL_FIELDS = [
     "timestamp",
     "state",
     "supply_temp",
+    "target_supply_temp",
     "return_temp",
     "dhw_temp",
+    "dhw_supply_temp",
     "flue_temp",
+    "feeder_temp",
     "delta_t",
+    "blower_pct",
+    "feeder_duty_pct",
+    "real_efficiency_pct",
     "thermal_kw",
     "burn_rate_per_h",
+    "burn_rate_per_24h",
     "fuel_consumed_today",
     "fuel_remaining_kg",
     "cost_today",
+    "avg_radiator_temp",
+    "distribution_temp_drop_k",
+    "distribution_loss_kw",
+    "distribution_loss_pct",
     "ch_pump_active",
     "dhw_pump_active",
 ]
@@ -200,6 +211,10 @@ class HistoryStore:
         ts = timestamp or time.time()
         path = self._plant_path(plant_id, "detail")
         self._migrate_header(path, PLANT_DETAIL_FIELDS)
+        def _opt(key: str) -> object:
+            v = data.get(key)
+            return v if v is not None else ""
+
         with open(path, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=PLANT_DETAIL_FIELDS)
             if os.path.getsize(path) == 0:
@@ -208,18 +223,27 @@ class HistoryStore:
                 {
                     "timestamp": ts,
                     "state": data.get("state", ""),
-                    "supply_temp": data.get("supply_temp") if data.get("supply_temp") is not None else "",
-                    "return_temp": data.get("return_temp") if data.get("return_temp") is not None else "",
-                    "dhw_temp": data.get("dhw_temp") if data.get("dhw_temp") is not None else "",
-                    "flue_temp": data.get("flue_temp") if data.get("flue_temp") is not None else "",
-                    "delta_t": data.get("delta_t") if data.get("delta_t") is not None else "",
+                    "supply_temp": _opt("supply_temp"),
+                    "target_supply_temp": _opt("target_supply_temp"),
+                    "return_temp": _opt("return_temp"),
+                    "dhw_temp": _opt("dhw_temp"),
+                    "dhw_supply_temp": _opt("dhw_supply_temp"),
+                    "flue_temp": _opt("flue_temp"),
+                    "feeder_temp": _opt("feeder_temp"),
+                    "delta_t": _opt("delta_t"),
+                    "blower_pct": _opt("blower_pct"),
+                    "feeder_duty_pct": _opt("feeder_duty_pct"),
+                    "real_efficiency_pct": _opt("real_efficiency_pct"),
                     "thermal_kw": data.get("current_thermal_kw", ""),
                     "burn_rate_per_h": data.get("burn_rate_per_h", ""),
+                    "burn_rate_per_24h": _opt("burn_rate_per_24h"),
                     "fuel_consumed_today": data.get("fuel_consumed_today", ""),
-                    "fuel_remaining_kg": (
-                        data.get("fuel_remaining_kg") if data.get("fuel_remaining_kg") is not None else ""
-                    ),
+                    "fuel_remaining_kg": _opt("fuel_remaining_kg"),
                     "cost_today": data.get("cost_today", ""),
+                    "avg_radiator_temp": _opt("avg_radiator_temp"),
+                    "distribution_temp_drop_k": _opt("distribution_temp_drop_k"),
+                    "distribution_loss_kw": _opt("distribution_loss_kw"),
+                    "distribution_loss_pct": _opt("distribution_loss_pct"),
                     "ch_pump_active": bool(data.get("ch_pump_active", False)),
                     "dhw_pump_active": bool(data.get("dhw_pump_active", False)),
                 }
@@ -303,15 +327,26 @@ class HistoryStore:
             }
             for field in (
                 "supply_temp",
+                "target_supply_temp",
                 "return_temp",
                 "dhw_temp",
+                "dhw_supply_temp",
                 "flue_temp",
+                "feeder_temp",
                 "delta_t",
+                "blower_pct",
+                "feeder_duty_pct",
+                "real_efficiency_pct",
                 "thermal_kw",
                 "burn_rate_per_h",
+                "burn_rate_per_24h",
                 "fuel_consumed_today",
                 "fuel_remaining_kg",
                 "cost_today",
+                "avg_radiator_temp",
+                "distribution_temp_drop_k",
+                "distribution_loss_kw",
+                "distribution_loss_pct",
             ):
                 vals = [v for r in bucket if (v := self._float(r.get(field, ""))) is not None]
                 avg_row[field] = round(sum(vals) / len(vals), 2) if vals else ""

@@ -414,6 +414,22 @@ export class RsDashboard extends LitElement {
                 : nothing
             }
             ${
+              live?.feeder_temp != null
+                ? html`<span>
+                    <ha-icon icon="mdi:screw-machine-flat-top"></ha-icon>
+                    ${this._t("Podajn.", "Feed.")} <b>${fmtTemp(live.feeder_temp)}</b>
+                  </span>`
+                : nothing
+            }
+            ${
+              live?.blower_pct != null
+                ? html`<span>
+                    <ha-icon icon="mdi:fan"></ha-icon>
+                    ${live.blower_mode ? `${live.blower_mode} ` : ""}<b>${formatNumber(live.blower_pct, this.hass, 0)}%</b>
+                  </span>`
+                : nothing
+            }
+            ${
               live?.flue_temp != null
                 ? html`<span>
                     <ha-icon icon="mdi:smoke"></ha-icon>
@@ -424,6 +440,11 @@ export class RsDashboard extends LitElement {
             <span>
               <ha-icon icon="mdi:flash"></ha-icon>
               <b>${formatNumber(live?.current_thermal_kw ?? 0, this.hass, 1)} kW</b>
+              ${
+                live?.burn_rate_per_24h != null
+                  ? html`· <b>${formatNumber(live.burn_rate_per_24h, this.hass, 1)} ${fuelUnit}/24h</b>`
+                  : nothing
+              }
             </span>
             <span>
               <ha-icon icon="mdi:scale-balance"></ha-icon>
@@ -431,6 +452,15 @@ export class RsDashboard extends LitElement {
               <b>${formatNumber(live?.fuel_consumed_today ?? 0, this.hass, 1)} ${fuelUnit}</b>
               (${formatNumber(live?.cost_today ?? 0, this.hass, 2)} ${plant.currency})
             </span>
+            ${
+              live?.distribution_loss_pct != null
+                ? html`<span>
+                    <ha-icon icon="mdi:pipe-leak"></ha-icon>
+                    ${this._t("Straty rur", "Pipe loss")}:
+                    <b>${formatNumber(live.distribution_loss_pct, this.hass, 1)}%</b>
+                  </span>`
+                : nothing
+            }
             ${
               live?.fuel_remaining_kg != null
                 ? html`<span>
@@ -443,16 +473,16 @@ export class RsDashboard extends LitElement {
             }
           </div>
           ${
-            alerts.length > 0 || live?.low_return_warning
+            alerts.length > 0 || (live?.warnings?.length ?? 0) > 0 || live?.low_return_warning
               ? html`<div class="plant-mini-alerts">
-                  ${live?.low_return_warning
-                    ? html`<span class="plant-alert-badge"
-                        ><ha-icon icon="mdi:thermometer-alert"></ha-icon>${this._t(
-                          "Zimny powrót (<45°C)!",
-                          "Cold return (<45°C)!",
-                        )}</span
-                      >`
-                    : nothing}
+                  ${(live?.warnings ?? []).map(
+                    (w) => html`<span class="plant-alert-badge"
+                      ><ha-icon
+                        icon=${w.severity === "critical" ? "mdi:alert-octagon" : "mdi:alert-outline"}
+                      ></ha-icon
+                      >${w.title}</span
+                    >`,
+                  )}
                   ${alerts.includes("refill")
                     ? html`<span class="plant-alert-badge"
                         ><ha-icon icon="mdi:fire-alert"></ha-icon>${this._t(

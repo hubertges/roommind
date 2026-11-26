@@ -20,9 +20,18 @@ describe("scheduleUsage", () => {
   test("lists the rooms per kind", () => {
     expect(scheduleUsage(rooms, "schedule.a")).toEqual({
       climate: ["kueche", "bad"],
+      ac: [],
+      humidity: [],
+      ventilation: [],
       cover: ["wohnzimmer"],
     });
-    expect(scheduleUsage(rooms, "schedule.x")).toEqual({ climate: [], cover: [] });
+    expect(scheduleUsage(rooms, "schedule.x")).toEqual({
+      climate: [],
+      ac: [],
+      humidity: [],
+      ventilation: [],
+      cover: [],
+    });
   });
 });
 

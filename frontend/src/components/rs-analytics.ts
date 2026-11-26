@@ -1,6 +1,8 @@
 /**
  * rs-analytics – Analytics tab orchestrator.
- * Delegates rendering to rs-analytics-toolbar, -summary, -chart, -rhythm and -model.
+ *
+ * Separates Room Analytics ("Pokoje") and Boiler / Heat Plant Analytics ("Piec / Kotłownia")
+ * into dedicated sub-tabs so boiler telemetry never clutters individual room views.
  */
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
@@ -11,6 +13,7 @@ import type {
   AnalyticsDataPoint,
   HeatPlantConfig,
   HeatPlantLive,
+  HeatPlantsAnalyticsData,
 } from "../types";
 import { localize } from "../utils/localize";
 import { boostHoursLeft } from "../utils/learning";
@@ -21,30 +24,43 @@ import {
   quickRange,
   startOfDayInZone,
 } from "../utils/analytics-time";
-import { formatNumber, formatPercent } from "../utils/format";
 import { tokens } from "../styles/tokens";
-import "./shared/rs-list-card";
 import "./analytics/rs-analytics-toolbar";
 import "./analytics/rs-analytics-summary";
 import "./analytics/rs-analytics-chart";
 import "./analytics/rs-analytics-rhythm";
 import "./analytics/rs-analytics-model";
+import "./analytics/rs-analytics-humidity-model";
 import "./analytics/rs-analytics-heat-plants";
 
-/** What a room can show: the summary, rhythm, chart and model card use the same flags. */
+/** What a room can show: the summary, rhythm, chart and model cards use the same flags. */
 function roomFlags(room: RoomConfig | undefined) {
+  const canHumidify = Boolean(
+    room?.humidifier_entity ||
+      room?.humidity_min != null ||
+      room?.comfort_humidify != null,
+  );
+  const canDehumidify = Boolean(
+    room?.dehumidifier_entity ||
+      room?.humidity_max != null ||
+      room?.comfort_dehumidify != null ||
+      (room?.ac_dry_enabled !== false && (room?.devices ?? []).some((d) => d.type === "ac")),
+  );
   return {
     canHeat: room?.climate_mode !== "cool_only",
     canCool:
       room?.climate_mode !== "heat_only" && (room?.devices ?? []).some((d) => d.type === "ac"),
     hasWindowSensor: (room?.window_sensors?.length ?? 0) > 0,
+    canHumidify,
+    canDehumidify,
     hasHumidityControl: Boolean(
       room?.humidifier_entity ||
         room?.dehumidifier_entity ||
         room?.humidity_min != null ||
         room?.humidity_max != null ||
         room?.comfort_humidify != null ||
-        room?.comfort_dehumidify != null,
+        room?.comfort_dehumidify != null ||
+        (room?.humidity_schedules?.length ?? 0) > 0,
     ),
     // The price only matters where it moves something
     followsPrice:
@@ -59,6 +75,14 @@ function bandSides(mode: string | undefined): "both" | "heat" | "cool" {
   return "both";
 }
 
+const BOILER_QUICK_RANGES: Array<{ key: string; labelPl: string; labelEn: string }> = [
+  { key: "24h", labelPl: "Dziś (24h)", labelEn: "Today (24h)" },
+  { key: "2d", labelPl: "2 dni", labelEn: "2 days" },
+  { key: "7d", labelPl: "7 dni", labelEn: "7 days" },
+  { key: "14d", labelPl: "14 dni", labelEn: "14 days" },
+  { key: "30d", labelPl: "30 dni", labelEn: "30 days" },
+];
+
 @customElement("rs-analytics")
 export class RsAnalytics extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
@@ -68,13 +92,16 @@ export class RsAnalytics extends LitElement {
   @property() public initialRoom = "";
   @property() public controlMode: "mpc" | "bangbang" = "mpc";
 
+  @state() private _section: "rooms" | "boiler" = "rooms";
   @state() private _selectedRoom = "";
   // Browser midnight until hass is known, then today in HA's zone (willUpdate)
   @state() private _rangeStart: number = new Date(new Date().setHours(0, 0, 0, 0)).getTime();
   @state() private _rangeEnd: number = Date.now();
   @state() private _data: AnalyticsData | null = null;
+  @state() private _boilerData: HeatPlantsAnalyticsData | null = null;
   @state() private _chartAnchor: number = Date.now();
   @state() private _loading = false;
+  @state() private _boilerLoading = false;
   @state() private _activeQuick: string | null = "24h";
 
   private _refreshInterval?: ReturnType<typeof setInterval>;
@@ -82,7 +109,16 @@ export class RsAnalytics extends LitElement {
   private _pointsOf: AnalyticsData | null = null;
   private _pointsCache: AnalyticsDataPoint[] = [];
   private _fetchId = 0;
+  private _boilerFetchId = 0;
   private _zoneApplied = false;
+
+  private get _isPl(): boolean {
+    return (this.hass?.language ?? "en").toLowerCase().startsWith("pl");
+  }
+
+  private _t(pl: string, en: string): string {
+    return this._isPl ? pl : en;
+  }
 
   connectedCallback() {
     super.connectedCallback();
@@ -104,6 +140,7 @@ export class RsAnalytics extends LitElement {
     }
     if (changedProps.has("initialRoom") && this.initialRoom) {
       this._selectedRoom = this.initialRoom;
+      this._section = "rooms";
     }
     let autoSelected = false;
     if (changedProps.has("rooms") && !this._selectedRoom) {
@@ -120,24 +157,133 @@ export class RsAnalytics extends LitElement {
         );
       }
     }
-    if (
-      autoSelected ||
-      changedProps.has("_selectedRoom") ||
-      changedProps.has("_rangeStart") ||
-      changedProps.has("_rangeEnd")
-    ) {
-      if (this._selectedRoom) {
-        this._fetchData();
+    const rangeChanged = changedProps.has("_rangeStart") || changedProps.has("_rangeEnd");
+    if (this._section === "rooms") {
+      if (autoSelected || changedProps.has("_selectedRoom") || changedProps.has("_section") || rangeChanged) {
+        if (this._selectedRoom) {
+          this._fetchData();
+        }
       }
+    } else if (changedProps.has("_section") || rangeChanged) {
+      this._fetchBoilerData();
     }
   }
 
+  private _hasBoilerWarnings(): boolean {
+    for (const p of this.heatPlants) {
+      const lv = this.heatPlantsLive[p.id];
+      if (!lv) continue;
+      if (
+        (lv.warnings && lv.warnings.length > 0) ||
+        lv.overheat_protect ||
+        lv.feeder_overheat_warning ||
+        lv.refill_needed ||
+        lv.ash_clean_needed ||
+        lv.chimney_clean_needed
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   protected render() {
+    const hasPlants = this.heatPlants.length > 0;
+    const boilerAlert = this._hasBoilerWarnings();
+
+    return html`
+      ${
+        hasPlants
+          ? html`
+              <div class="subtab-bar" role="tablist">
+                <button
+                  type="button"
+                  role="tab"
+                  class="subtab ${this._section === "rooms" ? "active" : ""}"
+                  aria-selected=${this._section === "rooms" ? "true" : "false"}
+                  @click=${() => {
+                    this._section = "rooms";
+                  }}
+                >
+                  <ha-icon icon="mdi:home-analytics"></ha-icon>
+                  <span>${this._t("Pokoje", "Rooms")}</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  class="subtab ${this._section === "boiler" ? "active" : ""}"
+                  aria-selected=${this._section === "boiler" ? "true" : "false"}
+                  @click=${() => {
+                    this._section = "boiler";
+                  }}
+                >
+                  <ha-icon icon="mdi:fire"></ha-icon>
+                  <span>${this._t("Piec / Kotłownia", "Boiler / Heat Plants")}</span>
+                  <span class="subtab-count">${this.heatPlants.length}</span>
+                  ${boilerAlert ? html`<span class="subtab-alert" aria-hidden="true"></span>` : nothing}
+                </button>
+              </div>
+            `
+          : nothing
+      }
+      ${this._section === "boiler" && hasPlants ? this._renderBoilerTab() : this._renderRoomsTab()}
+    `;
+  }
+
+  private _renderBoilerTab() {
+    const plants = this._boilerData?.heat_plants ?? this.heatPlants;
+    const plantsLive = this._boilerData?.heat_plants_live ?? this.heatPlantsLive;
+    const plantsHistory = this._boilerData?.heat_plants_history ?? {};
+    const outdoorTemp = this._boilerData?.outdoor_temp ?? null;
+
+    return html`
+      <div class="boiler-toolbar">
+        <div class="boiler-ranges" role="group">
+          ${BOILER_QUICK_RANGES.map(
+            (r) => html`
+              <button
+                type="button"
+                class="range-chip ${this._activeQuick === r.key ? "active" : ""}"
+                @click=${() => this._selectBoilerQuick(r.key)}
+              >
+                ${this._isPl ? r.labelPl : r.labelEn}
+              </button>
+            `,
+          )}
+        </div>
+        <button
+          type="button"
+          class="refresh-btn"
+          ?disabled=${this._boilerLoading}
+          @click=${() => this._fetchBoilerData()}
+        >
+          <ha-icon icon="mdi:refresh"></ha-icon>
+          <span>${this._t("Odśwież", "Refresh")}</span>
+        </button>
+      </div>
+      ${
+        this._boilerLoading && !this._boilerData
+          ? html`<div class="loading">${localize("panel.loading", this.hass.language)}</div>`
+          : html`
+              <rs-analytics-heat-plants
+                .hass=${this.hass}
+                .heatPlants=${plants}
+                .heatPlantsLive=${plantsLive}
+                .heatPlantsHistory=${plantsHistory}
+                .outdoorTemp=${outdoorTemp}
+                .rangeStart=${this._rangeStart}
+                .rangeEnd=${this._rangeEnd}
+                @heat-plants-updated=${() => this._fetchBoilerData()}
+              ></rs-analytics-heat-plants>
+            `
+      }
+    `;
+  }
+
+  private _renderRoomsTab() {
     const l = this.hass.language;
-    const flags = roomFlags(this.rooms[this._selectedRoom]);
-    const plants = this._data?.heat_plants ?? this.heatPlants;
-    const plantsLive = this._data?.heat_plants_live ?? this.heatPlantsLive;
-    const plantsHistory = this._data?.heat_plants_history ?? {};
+    const room = this.rooms[this._selectedRoom];
+    const flags = roomFlags(room);
 
     return html`
       <rs-analytics-toolbar
@@ -153,19 +299,6 @@ export class RsAnalytics extends LitElement {
         @range-changed=${this._onRangeChanged}
       ></rs-analytics-toolbar>
       ${
-        plants.length > 0
-          ? html`<rs-analytics-heat-plants
-              .hass=${this.hass}
-              .heatPlants=${plants}
-              .heatPlantsLive=${plantsLive}
-              .heatPlantsHistory=${plantsHistory}
-              .rangeStart=${this._rangeStart}
-              .rangeEnd=${this._rangeEnd}
-              @heat-plants-updated=${() => this._silentRefresh()}
-            ></rs-analytics-heat-plants>`
-          : nothing
-      }
-      ${
         this._selectedRoom
           ? this._loading && !this._data
             ? html`<div class="loading">${localize("panel.loading", l)}</div>`
@@ -178,12 +311,12 @@ export class RsAnalytics extends LitElement {
                   .rangeEnd=${this._rangeEnd}
                   .chartAnchor=${this._chartAnchor}
                   .language=${l}
-                  .isOutdoor=${this.rooms[this._selectedRoom]?.is_outdoor ?? false}
-                  .targetBand=${bandSides(this.rooms[this._selectedRoom]?.climate_mode)}
+                  .isOutdoor=${room?.is_outdoor ?? false}
+                  .targetBand=${bandSides(room?.climate_mode)}
                   .showPrice=${flags.followsPrice}
                 ></rs-analytics-chart>
                 ${
-                  !this.rooms[this._selectedRoom]?.is_outdoor
+                  !room?.is_outdoor
                     ? html`<rs-analytics-rhythm
                         .hass=${this.hass}
                         .rhythm=${this._data?.rhythm ?? null}
@@ -193,29 +326,40 @@ export class RsAnalytics extends LitElement {
                         .canHeat=${flags.canHeat}
                         .canCool=${flags.canCool}
                         .hasWindowSensor=${flags.hasWindowSensor}
-                        .bandSides=${bandSides(this.rooms[this._selectedRoom]?.climate_mode)}
+                        .bandSides=${bandSides(room?.climate_mode)}
                         @day-selected=${this._onDaySelected}
                       ></rs-analytics-rhythm>`
                     : nothing
                 }
                 ${
-                  !this.rooms[this._selectedRoom]?.is_outdoor
-                    ? html` <rs-analytics-model
+                  !room?.is_outdoor
+                    ? html`<rs-analytics-model
                         .hass=${this.hass}
                         .data=${this._data}
                         .language=${l}
                         .controlMode=${this.controlMode}
-                        .managed=${!this.rooms[this._selectedRoom]?.temperature_sensor}
+                        .managed=${!room?.temperature_sensor}
                         .canHeat=${flags.canHeat}
                         .canCool=${flags.canCool}
                         .boostHours=${boostHoursLeft(
-                          this.rooms[this._selectedRoom]?.live?.boost_applied_at,
-                          this.rooms[this._selectedRoom]?.live?.n_observations,
+                          room?.live?.boost_applied_at,
+                          room?.live?.n_observations,
                         )}
                       ></rs-analytics-model>`
                     : nothing
                 }
-                ${this._renderHumidityModel()}
+                ${
+                  !room?.is_outdoor && this._data?.humidity_model
+                    ? html`<rs-analytics-humidity-model
+                        .hass=${this.hass}
+                        .data=${this._data}
+                        .language=${l}
+                        .controlMode=${this.controlMode}
+                        .canHumidify=${flags.canHumidify}
+                        .canDehumidify=${flags.canDehumidify}
+                      ></rs-analytics-humidity-model>`
+                    : nothing
+                }
               `
           : html`
               <div class="no-data">
@@ -250,49 +394,6 @@ export class RsAnalytics extends LitElement {
     ></rs-analytics-summary>`;
   }
 
-  private _renderHumidityModel() {
-    const hm = this._data?.humidity_model;
-    if (!hm) return nothing;
-    const isPl = (this.hass?.language ?? "en").toLowerCase().startsWith("pl");
-    const t = (pl: string, en: string) => (isPl ? pl : en);
-    const pct = Math.round((hm.confidence ?? 0) * 100);
-    return html`
-      <rs-list-card
-        class="hum-model-card"
-        .heading=${t("Model nawilżania (MPC)", "Humidification MPC Model")}
-      >
-        <div class="hum-model-body">
-          <div class="hum-model-badge ${hm.mpc_active ? "active" : ""}">
-            <ha-icon icon="mdi:water-percent"></ha-icon>
-            ${
-              hm.mpc_active
-                ? t("MPC nawilżania AKTYWNE", "Humidity MPC ACTIVE")
-                : t("Uczenie modelu nawilżania", "Humidity MPC learning")
-            }
-          </div>
-          <div class="hum-model-grid">
-            <div class="hum-stat">
-              <span class="hum-stat-label">${t("Pewność modelu", "Confidence")}</span>
-              <span class="hum-stat-val">${formatPercent(pct, this.hass)}</span>
-            </div>
-            <div class="hum-stat">
-              <span class="hum-stat-label">${t("Obserwacje", "Observations")}</span>
-              <span class="hum-stat-val">${formatNumber(hm.n_observations, this.hass, 0)}</span>
-            </div>
-            <div class="hum-stat">
-              <span class="hum-stat-label">${t("Próbki nawilżania", "Humidifying samples")}</span>
-              <span class="hum-stat-val">${formatNumber(hm.n_humidifying, this.hass, 0)}</span>
-            </div>
-            <div class="hum-stat">
-              <span class="hum-stat-label">${t("Próbki osuszania", "Dehumidifying samples")}</span>
-              <span class="hum-stat-val">${formatNumber(hm.n_dehumidifying, this.hass, 0)}</span>
-            </div>
-          </div>
-        </div>
-      </rs-list-card>
-    `;
-  }
-
   /** History and detail as loaded; one array per answer so the summary does not redraw needlessly. */
   private _points(): AnalyticsDataPoint[] {
     const data = this._data;
@@ -324,6 +425,12 @@ export class RsAnalytics extends LitElement {
     this._rangeStart = rangeStart;
     this._rangeEnd = rangeEnd;
     this._chartAnchor = chartAnchor;
+  }
+
+  private _selectBoilerQuick(key: string) {
+    this._activeQuick = key;
+    this._applyQuickRange();
+    this._chartAnchor = this._rangeEnd;
   }
 
   /** Recompute the active quick range up to now (today moves on, a new day starts at midnight). */
@@ -383,7 +490,34 @@ export class RsAnalytics extends LitElement {
     }
   }
 
+  private async _fetchBoilerData() {
+    const fetchId = ++this._boilerFetchId;
+    this._boilerLoading = true;
+    try {
+      const result = await this.hass.callWS<HeatPlantsAnalyticsData>({
+        type: "roommind/heat_plants/analytics",
+        start_ts: this._rangeStart / 1000,
+        end_ts: this._rangeEnd / 1000,
+      });
+      if (fetchId === this._boilerFetchId) this._boilerData = result;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.debug("[RoomMind] fetchBoilerData:", err);
+    } finally {
+      if (fetchId === this._boilerFetchId) this._boilerLoading = false;
+    }
+  }
+
   private async _silentRefresh() {
+    if (this._section === "boiler") {
+      if (this._boilerLoading) return;
+      if (this._activeQuick) {
+        this._applyQuickRange();
+        return;
+      }
+      await this._fetchBoilerData();
+      return;
+    }
     if (!this._selectedRoom || this._loading) return;
     if (this._activeQuick) {
       // A new end (and after midnight a new start) refetches through willUpdate; same room,
@@ -412,66 +546,121 @@ export class RsAnalytics extends LitElement {
         min-width: 0;
       }
 
-      rs-analytics-chart {
-        scroll-margin-top: 120px;
+      .subtab-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: var(--rs-space-4);
+        padding: 4px;
+        border-radius: 12px;
+        background: var(--rs-fill);
+        width: fit-content;
       }
 
-      .hum-model-card {
-        display: block;
+      .subtab {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 8px 16px;
+        border: none;
+        border-radius: 9px;
+        background: transparent;
+        color: var(--secondary-text-color);
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        --mdc-icon-size: 18px;
+        transition:
+          background 0.15s,
+          color 0.15s;
+      }
+
+      .subtab:hover {
+        color: var(--primary-text-color);
+      }
+
+      .subtab.active {
+        background: var(--card-background-color, var(--primary-background-color));
+        color: var(--primary-text-color);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+      }
+
+      .subtab-count {
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: var(--rs-fill);
+        color: var(--secondary-text-color);
+      }
+
+      .subtab.active .subtab-count {
+        background: var(--rs-fill-primary);
+        color: var(--primary-color);
+      }
+
+      .subtab-alert {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--rs-err);
+      }
+
+      .boiler-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
         margin-bottom: var(--rs-space-4);
       }
 
-      .hum-model-body {
-        padding: var(--rs-space-2) var(--rs-space-4) var(--rs-space-4);
+      .boiler-ranges {
         display: flex;
-        flex-direction: column;
-        gap: var(--rs-space-3);
+        flex-wrap: wrap;
+        gap: 6px;
       }
 
-      .hum-model-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        align-self: flex-start;
-        padding: 4px 10px;
+      .range-chip {
+        padding: 6px 12px;
         border-radius: 999px;
+        border: 1px solid var(--divider-color);
+        background: transparent;
+        color: var(--primary-text-color);
+        font-family: inherit;
         font-size: 12px;
         font-weight: 500;
-        background: var(--rs-fill);
-        color: var(--secondary-text-color);
+        cursor: pointer;
+      }
+
+      .range-chip.active {
+        border-color: var(--primary-color);
+        background: var(--rs-fill-primary);
+        color: var(--primary-color);
+      }
+
+      .refresh-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 6px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--divider-color);
+        background: transparent;
+        color: var(--primary-text-color);
+        font-family: inherit;
+        font-size: 12px;
+        cursor: pointer;
         --mdc-icon-size: 16px;
       }
 
-      .hum-model-badge.active {
-        background: color-mix(in srgb, var(--rs-humidify) 16%, transparent);
-        color: var(--rs-humidify-text);
+      .refresh-btn:hover:not(:disabled) {
+        border-color: var(--primary-color);
+        color: var(--primary-color);
       }
 
-      .hum-model-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 10px;
-      }
-
-      .hum-stat {
-        padding: 10px 12px;
-        border-radius: var(--rs-radius-sm);
-        background: var(--rs-fill);
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-
-      .hum-stat-label {
-        font-size: 11px;
-        color: var(--secondary-text-color);
-      }
-
-      .hum-stat-val {
-        font-size: 17px;
-        font-weight: 500;
-        color: var(--rs-humidify-text);
-        font-variant-numeric: tabular-nums;
+      rs-analytics-chart {
+        scroll-margin-top: 120px;
       }
 
       .no-data {

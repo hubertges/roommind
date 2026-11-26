@@ -472,6 +472,26 @@ def get_active_schedule_entity(
     return None
 
 
+def get_active_schedule_entity_for(
+    hass: HomeAssistant,
+    room: dict,
+    schedules_key: str,
+    selector_key: str,
+) -> tuple[int, str | None]:
+    """Return (active_index, entity_id) for an auxiliary room schedule list (humidity/AC/ventilation)."""
+    schedules = room.get(schedules_key) or []
+    if not schedules:
+        return -1, None
+    proxy = {
+        "schedules": schedules,
+        "schedule_selector_entity": room.get(selector_key, ""),
+    }
+    idx = resolve_schedule_index(hass, proxy)
+    if 0 <= idx < len(schedules):
+        return idx, schedules[idx].get("entity_id", "") or None
+    return -1, None
+
+
 def next_schedule_change(hass: HomeAssistant, room: dict) -> float | None:
     """Return the timestamp of the active schedule's next block boundary, or None without one."""
     entity_id = get_active_schedule_entity(hass, room)

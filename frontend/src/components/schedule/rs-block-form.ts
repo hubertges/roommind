@@ -58,6 +58,8 @@ export class RsBlockForm extends LitElement {
   @property({ type: String }) public blockKey = "";
   /** Block of a cover schedule: position instead of temperature. */
   @property({ type: Boolean }) public cover = false;
+  /** Optional schedule kind hint ("climate" | "ac" | "humidity" | "ventilation" | "cover" | ""). */
+  @property({ type: String }) public scheduleKind = "";
   /** Every room uses the cover schedule only to allow shading: the position does not count. */
   @property({ type: Boolean }) public gateOnly = false;
 
@@ -246,74 +248,108 @@ export class RsBlockForm extends LitElement {
   private _renderTemperature() {
     const l = this.hass.language;
     const isPl = (l ?? "pl").toLowerCase().startsWith("pl");
-    return html`<div class="section">
-        <p class="section-title" id="temp-title">${localize("schedule_editor.temperature", l)}</p>
-        <rs-segmented
-          .label=${localize("schedule_editor.temperature", l)}
-          .options=${[
-            { value: "comfort", label: localize("override.comfort", l), icon: "mdi:sofa" },
-            { value: "own", label: localize("schedule_editor.own", l), icon: "mdi:thermometer" },
-          ]}
-          .value=${this._own ? "own" : "comfort"}
-          @value-changed=${this._onKind}
-        ></rs-segmented>
-        ${this._own ? this._renderOwn() : html`<p class="hint">${this._comfortHint()}</p>`}
-      </div>
-      <div class="section">
+    if (this.scheduleKind === "ventilation") {
+      return html`<div class="section">
         <p class="section-title">
-          ${isPl ? "Nawilżacz w tym przedziale godzin" : "Humidifier in this time block"}
+          ${isPl ? "Wentylacja w tym przedziale godzin" : "Ventilation in this time block"}
         </p>
-        <rs-segmented
-          .label=${isPl ? "Nawilżacz" : "Humidifier"}
-          .options=${[
-            {
-              value: "comfort",
-              label: localize("override.comfort", l),
-              icon: "mdi:air-humidifier",
-            },
-            {
-              value: "own",
-              label: localize("schedule_editor.own", l),
-              icon: "mdi:water-percent",
-            },
-            {
-              value: "off",
-              label: isPl ? "Wyłączony" : "Off",
-              icon: "mdi:air-humidifier-off",
-            },
-          ]}
-          .value=${this._humMode}
-          @value-changed=${this._onHumKind}
-        ></rs-segmented>
-        ${
-          this._humMode === "own"
-            ? html`<div class="temp-row cool">
-                <span>
-                  <ha-icon icon="mdi:air-humidifier" aria-hidden="true"></ha-icon>
-                  ${isPl ? "Nawilżaj poniżej" : "Humidify below"}
-                </span>
-                <rs-stepper
-                  .language=${l}
-                  .label=${isPl ? "Nawilżaj poniżej" : "Humidify below"}
-                  .value=${this._humidify}
-                  .min=${25}
-                  .max=${75}
-                  .step=${1}
-                  .editable=${true}
-                  unit="%"
-                  @value-changed=${(e: CustomEvent<{ value: number }>) =>
-                    this._onHumValue(e.detail.value)}
-                ></rs-stepper>
-              </div>`
-            : this._humMode === "off"
-              ? html`<p class="hint">
-                  ${isPl
-                    ? "Nawilżacz będzie całkowicie wyłączony w tych godzinach (np. w nocy)."
-                    : "The humidifier will stay off during these hours (e.g. at night)."}
-                </p>`
-              : nothing
-        }
+        <p class="hint">
+          ${isPl
+            ? "W tym przedziale harmonogram wentylacji jest AKTYWNY (tryb wymuszony włącza wentylację; tryb bramki zezwala na pracę przy złej jakości powietrza)."
+            : "During this time block the ventilation schedule is ACTIVE (force mode runs ventilation; gate mode permits ventilation when air quality is bad)."}
+        </p>
       </div>`;
+    }
+    const showTemp = this.scheduleKind !== "humidity";
+    const showHumidity = this.scheduleKind !== "ac";
+    return html`${
+        showTemp
+          ? html`<div class="section">
+              <p class="section-title" id="temp-title">
+                ${
+                  this.scheduleKind === "ac"
+                    ? isPl
+                      ? "Temperatura chłodzenia (AC)"
+                      : "AC Cooling Temperature"
+                    : localize("schedule_editor.temperature", l)
+                }
+              </p>
+              <rs-segmented
+                .label=${localize("schedule_editor.temperature", l)}
+                .options=${[
+                  { value: "comfort", label: localize("override.comfort", l), icon: "mdi:sofa" },
+                  {
+                    value: "own",
+                    label: localize("schedule_editor.own", l),
+                    icon: "mdi:thermometer",
+                  },
+                ]}
+                .value=${this._own ? "own" : "comfort"}
+                @value-changed=${this._onKind}
+              ></rs-segmented>
+              ${this._own ? this._renderOwn() : html`<p class="hint">${this._comfortHint()}</p>`}
+            </div>`
+          : nothing
+      }
+      ${
+        showHumidity
+          ? html`<div class="section">
+              <p class="section-title">
+                ${isPl ? "Nawilżacz w tym przedziale godzin" : "Humidifier in this time block"}
+              </p>
+              <rs-segmented
+                .label=${isPl ? "Nawilżacz" : "Humidifier"}
+                .options=${[
+                  {
+                    value: "comfort",
+                    label: localize("override.comfort", l),
+                    icon: "mdi:air-humidifier",
+                  },
+                  {
+                    value: "own",
+                    label: localize("schedule_editor.own", l),
+                    icon: "mdi:water-percent",
+                  },
+                  {
+                    value: "off",
+                    label: isPl ? "Wyłączony" : "Off",
+                    icon: "mdi:air-humidifier-off",
+                  },
+                ]}
+                .value=${this._humMode}
+                @value-changed=${this._onHumKind}
+              ></rs-segmented>
+              ${
+                this._humMode === "own"
+                  ? html`<div class="temp-row cool">
+                      <span>
+                        <ha-icon icon="mdi:air-humidifier" aria-hidden="true"></ha-icon>
+                        ${isPl ? "Nawilżaj poniżej" : "Humidify below"}
+                      </span>
+                      <rs-stepper
+                        .language=${l}
+                        .label=${isPl ? "Nawilżaj poniżej" : "Humidify below"}
+                        .value=${this._humidify}
+                        .min=${25}
+                        .max=${75}
+                        .step=${1}
+                        .editable=${true}
+                        unit="%"
+                        @value-changed=${(e: CustomEvent<{ value: number }>) =>
+                          this._onHumValue(e.detail.value)}
+                      ></rs-stepper>
+                    </div>`
+                  : this._humMode === "off"
+                    ? html`<p class="hint">
+                        ${isPl
+                          ? "Nawilżacz będzie całkowicie wyłączony w tych godzinach (np. w nocy)."
+                          : "The humidifier will stay off during these hours (e.g. at night)."}
+                      </p>`
+                    : nothing
+              }
+            </div>`
+          : nothing
+      }`;
   }
 
   private _renderPosition() {

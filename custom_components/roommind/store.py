@@ -368,6 +368,13 @@ class RoomMindStore:
             "room_fan_entity": config.get("room_fan_entity", ""),
             "room_fan_mode": config.get("room_fan_mode", DEFAULT_ROOM_FAN_MODE),
             "ac_dry_enabled": config.get("ac_dry_enabled", True),
+            "humidity_schedules": config.get("humidity_schedules", []),
+            "humidity_schedule_selector_entity": config.get("humidity_schedule_selector_entity", ""),
+            "ac_schedules": config.get("ac_schedules", []),
+            "ac_schedule_selector_entity": config.get("ac_schedule_selector_entity", ""),
+            "ventilation_schedules": config.get("ventilation_schedules", []),
+            "ventilation_schedule_selector_entity": config.get("ventilation_schedule_selector_entity", ""),
+            "ventilation_schedule_mode": config.get("ventilation_schedule_mode", "gate"),
         }
         _single_temps_to_cool_side(room, config, room["climate_mode"])
         # Directional device sync for new rooms (truthiness check, not just presence)

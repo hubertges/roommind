@@ -52,12 +52,13 @@ from .const import (
     is_override_suppressed,
 )
 from .control.direct_valve import async_release_valve
-from .managers.heat_plant_manager import FUEL_TYPES, HEAT_PLANT_TYPES
+from .managers.heat_plant_manager import BOILER_MODES, FUEL_TYPES, HEAT_PLANT_TYPES, HeatPlantConfig
 from .services.analytics_service import (
     _compute_target_forecast,  # noqa: F401 - re-exported for tests
     _csv_to_points,  # noqa: F401 - re-exported for tests
     _safe_float,  # noqa: F401 - re-exported for tests
     build_analytics_data,
+    build_heat_plants_analytics_data,
 )
 from .utils.area_utils import REST_SWITCHED_OFF, ha_floor_order, rooms_with_area, rooms_without_area
 from .utils.device_utils import (
@@ -221,6 +222,13 @@ _ROOM_SAVE_FIELDS = (
     "room_fan_entity",
     "room_fan_mode",
     "ac_dry_enabled",
+    "humidity_schedules",
+    "humidity_schedule_selector_entity",
+    "ac_schedules",
+    "ac_schedule_selector_entity",
+    "ventilation_schedules",
+    "ventilation_schedule_selector_entity",
+    "ventilation_schedule_mode",
 )
 
 # Same limits as the room climate entity; also turns away nan/inf
@@ -288,6 +296,11 @@ _SETTINGS_SAVE_FIELDS = (
     "mold_prevention_intensity",
     "mold_prevention_notify_enabled",
     "mold_prevention_notify_targets",
+    "humidity_control_enabled",
+    "humidity_mpc_enabled",
+    "default_humidity_min",
+    "default_humidity_max",
+    "humidity_alerts_enabled",
     "heat_plant_notifications_enabled",
     "heat_plant_notification_targets",
     "heat_plant_notification_cooldown",
@@ -725,6 +738,13 @@ async def websocket_list_rooms(
         ),
         vol.Optional("room_fan_mode"): vol.In(ROOM_FAN_MODES),
         vol.Optional("ac_dry_enabled"): bool,
+        vol.Optional("humidity_schedules"): [{vol.Required("entity_id"): str}],
+        vol.Optional("humidity_schedule_selector_entity"): str,
+        vol.Optional("ac_schedules"): [{vol.Required("entity_id"): str}],
+        vol.Optional("ac_schedule_selector_entity"): str,
+        vol.Optional("ventilation_schedules"): [{vol.Required("entity_id"): str}],
+        vol.Optional("ventilation_schedule_selector_entity"): str,
+        vol.Optional("ventilation_schedule_mode"): vol.In(["gate", "force"]),
     }
 )
 @websocket_api.async_response
@@ -1140,6 +1160,11 @@ async def websocket_get_settings(
                 vol.Optional("off_mode", default=MASTER_OFF_MODE_OFF): vol.In(MASTER_OFF_MODES),
             }
         ],
+        vol.Optional("humidity_control_enabled"): bool,
+        vol.Optional("humidity_mpc_enabled"): bool,
+        vol.Optional("default_humidity_min"): vol.All(vol.Coerce(float), vol.Range(min=15.0, max=70.0)),
+        vol.Optional("default_humidity_max"): vol.All(vol.Coerce(float), vol.Range(min=35.0, max=90.0)),
+        vol.Optional("humidity_alerts_enabled"): bool,
         vol.Optional("heat_plant_notifications_enabled"): bool,
         vol.Optional("heat_plant_notification_cooldown"): vol.All(vol.Coerce(int), vol.Range(min=10, max=1440)),
         vol.Optional("heat_plant_notification_targets"): [
@@ -1159,9 +1184,12 @@ async def websocket_get_settings(
                 vol.Optional("parent_plant_id", default=""): str,
                 vol.Optional("cannot_extinguish"): bool,
                 vol.Optional("min_power_pct", default=12.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=50)),
+                vol.Optional("boiler_mode", default="auto"): vol.In(BOILER_MODES),
                 vol.Optional("assigned_devices", default=[]): [str],
                 vol.Optional("assigned_rooms", default=[]): [str],
                 vol.Optional("source_entity", default=""): str,
+                vol.Optional("boiler_target_temp_entity", default=""): str,
+                vol.Optional("dhw_target_temp_entity", default=""): str,
                 vol.Optional("target_supply_temp", default=55.0): vol.Coerce(float),
                 vol.Optional("idle_supply_temp", default=42.0): vol.Coerce(float),
                 vol.Optional("off_mode", default="temperature"): vol.In(["off", "temperature"]),
@@ -1169,7 +1197,34 @@ async def websocket_get_settings(
                 vol.Optional("supply_temp_sensor", default=""): str,
                 vol.Optional("return_temp_sensor", default=""): str,
                 vol.Optional("dhw_temp_sensor", default=""): str,
+                vol.Optional("dhw_supply_temp_sensor", default=""): str,
                 vol.Optional("flue_temp_sensor", default=""): str,
+                vol.Optional("feeder_temp_sensor", default=""): str,
+                vol.Optional("boiler_room_temp_sensor", default=""): str,
+                vol.Optional("feeder_work_time_sensor", default=""): str,
+                vol.Optional("feeder_pause_time_sensor", default=""): str,
+                vol.Optional("feeder_work_time_s", default=0.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=600)),
+                vol.Optional("feeder_pause_time_s", default=0.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=7200)),
+                vol.Optional("blower_sensor", default=""): str,
+                vol.Optional("blower_mode_sensor", default=""): str,
+                vol.Optional("daily_fuel_sensor", default=""): str,
+                vol.Optional("flow_rate_l_min", default=0.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+                vol.Optional("flow_rate_sensor", default=""): str,
+                vol.Optional("boiler_water_volume_l", default=50.0): vol.All(vol.Coerce(float), vol.Range(min=5, max=2000)),
+                vol.Optional("radiator_sensors", default=[]): [
+                    vol.Any(
+                        str,
+                        {
+                            vol.Required("entity_id"): str,
+                            vol.Optional("return_entity_id", default=""): str,
+                            vol.Optional("room_id", default=""): str,
+                            vol.Optional("name", default=""): str,
+                            vol.Optional("pipe_length_m", default=0.0): vol.All(
+                                vol.Coerce(float), vol.Range(min=0, max=500)
+                            ),
+                        },
+                    )
+                ],
                 vol.Optional("ch_pump_entity", default=""): str,
                 vol.Optional("ch_pump_min_supply_temp", default=40.0): vol.Coerce(float),
                 vol.Optional("ch_pump_overrun_temp", default=80.0): vol.Coerce(float),
@@ -1178,6 +1233,7 @@ async def websocket_get_settings(
                 vol.Optional("ufh_min_supply_temp", default=25.0): vol.Coerce(float),
                 vol.Optional("ufh_max_supply_temp", default=48.0): vol.Coerce(float),
                 vol.Optional("dhw_pump_entity", default=""): str,
+                vol.Optional("dhw_circulation_pump_entity", default=""): str,
                 vol.Optional("dhw_target_temp", default=50.0): vol.Coerce(float),
                 vol.Optional("dhw_hysteresis", default=3.0): vol.Coerce(float),
                 vol.Optional("dhw_min_supply_delta", default=3.0): vol.Coerce(float),
@@ -1198,10 +1254,29 @@ async def websocket_get_settings(
                 vol.Optional("hopper_capacity_kg", default=100.0): vol.All(
                     vol.Coerce(float), vol.Range(min=1.0, max=5000.0)
                 ),
+                vol.Optional("bag_weight_kg", default=25.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=1.0, max=100.0)
+                ),
                 vol.Optional("hopper_level_sensor", default=""): str,
                 vol.Optional("ash_content_pct", default=7.0): vol.All(
                     vol.Coerce(float), vol.Range(min=0.0, max=40.0)
                 ),
+                vol.Optional("feeder_max_temp", default=60.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=35.0, max=95.0)
+                ),
+                vol.Optional("flue_max_temp", default=220.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=100.0, max=500.0)
+                ),
+                vol.Optional("return_min_temp", default=45.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=20.0, max=65.0)
+                ),
+                vol.Optional("min_boiler_temp_alert", default=35.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=65.0)
+                ),
+                vol.Optional("distribution_loss_alert_pct", default=25.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=5.0, max=80.0)
+                ),
+                vol.Optional("notify_warnings_enabled", default=True): bool,
                 vol.Optional("notify_refill_enabled", default=False): bool,
                 vol.Optional("refill_alert_kg", default=20.0): vol.All(
                     vol.Coerce(float), vol.Range(min=0.0, max=1000.0)
@@ -1579,7 +1654,9 @@ async def websocket_heat_plants_reset_stats(
         vol.Required("type"): "roommind/heat_plants/log_fuel",
         vol.Required("plant_id"): str,
         vol.Required("kg"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=5000.0)),
-        vol.Optional("mode", default="burned"): vol.In(["burned", "refill"]),
+        vol.Optional("mode", default="refill"): vol.In(["burned", "refill"]),
+        vol.Optional("bags"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=500.0)),
+        vol.Optional("filled_to_full", default=False): bool,
     }
 )
 @websocket_api.async_response
@@ -1588,7 +1665,7 @@ async def websocket_heat_plants_log_fuel(
     connection: ActiveConnection,
     msg: dict,
 ) -> None:
-    """Log manual kg of burned fuel or hopper/fireplace refill."""
+    """Log hopper/fireplace fuel refill (bags / kg) and calibrate auto-burn model."""
     store = hass.data[DOMAIN]["store"]
     coordinator = _get_coordinator(hass)
     if not coordinator:
@@ -1596,7 +1673,11 @@ async def websocket_heat_plants_log_fuel(
         return
     coordinator._heat_plant_manager.load_configs(store.get_settings().get("heat_plants", []))
     ok = coordinator._heat_plant_manager.log_fuel(
-        msg["plant_id"], float(msg["kg"]), mode=msg.get("mode", "burned")
+        msg["plant_id"],
+        float(msg["kg"]),
+        mode=msg.get("mode", "refill"),
+        bags=float(msg["bags"]) if msg.get("bags") is not None else None,
+        filled_to_full=bool(msg.get("filled_to_full", False)),
     )
     if not ok:
         connection.send_error(msg["id"], "not_found", f"Heat plant '{msg['plant_id']}' not found")
@@ -1638,6 +1719,76 @@ async def websocket_heat_plants_maintenance(
     connection.send_result(msg["id"], {"success": True})
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/heat_plants/analytics",
+        vol.Optional("range", default="24h"): vol.In(["12h", "24h", "2d", "7d", "14d", "30d", "90d"]),
+        vol.Optional("start_ts"): vol.Coerce(float),
+        vol.Optional("end_ts"): vol.Coerce(float),
+    }
+)
+@websocket_api.async_response
+async def websocket_heat_plants_analytics(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Return dedicated analytics, live telemetry, history, and Boiler MPC data for all heat plants."""
+    store = hass.data[DOMAIN]["store"]
+    coordinator = _get_coordinator(hass)
+    result = await build_heat_plants_analytics_data(
+        hass,
+        msg.get("range", "24h"),
+        store,
+        coordinator,
+        custom_start=msg.get("start_ts"),
+        custom_end=msg.get("end_ts"),
+    )
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roommind/heat_plants/set_temperatures",
+        vol.Required("plant_id"): str,
+        vol.Optional("target_supply_temp"): vol.All(vol.Coerce(float), vol.Range(min=20.0, max=90.0)),
+        vol.Optional("idle_supply_temp"): vol.All(vol.Coerce(float), vol.Range(min=15.0, max=75.0)),
+        vol.Optional("dhw_target_temp"): vol.All(vol.Coerce(float), vol.Range(min=30.0, max=75.0)),
+        vol.Optional("boiler_mode"): vol.In(BOILER_MODES),
+    }
+)
+@websocket_api.async_response
+async def websocket_heat_plants_set_temperatures(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict,
+) -> None:
+    """Quick-update boiler target temperatures & mode and immediately push setpoints to HA entities."""
+    store = hass.data[DOMAIN]["store"]
+    coordinator = _get_coordinator(hass)
+    plant_id = msg["plant_id"]
+    plants = list(store.get_settings().get("heat_plants", []))
+    found_idx = -1
+    for i, p in enumerate(plants):
+        if isinstance(p, dict) and p.get("id") == plant_id:
+            found_idx = i
+            break
+    if found_idx < 0:
+        connection.send_error(msg["id"], "not_found", f"Heat plant '{plant_id}' not found")
+        return
+    updated = dict(plants[found_idx])
+    for key in ("target_supply_temp", "idle_supply_temp", "dhw_target_temp", "boiler_mode"):
+        if key in msg:
+            updated[key] = msg[key]
+    plants[found_idx] = updated
+    await store.async_save_settings({"heat_plants": plants})
+    if coordinator:
+        coordinator._heat_plant_manager.load_configs(plants)
+        await coordinator._heat_plant_manager.async_apply_setpoints(HeatPlantConfig.from_dict(updated))
+        await coordinator.async_request_refresh()
+    connection.send_result(msg["id"], {"success": True, "plant": updated})
+
+
 @callback
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     """Register all RoomMind WebSocket commands."""
@@ -1657,3 +1808,5 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_heat_plants_reset_stats)
     websocket_api.async_register_command(hass, websocket_heat_plants_log_fuel)
     websocket_api.async_register_command(hass, websocket_heat_plants_maintenance)
+    websocket_api.async_register_command(hass, websocket_heat_plants_analytics)
+    websocket_api.async_register_command(hass, websocket_heat_plants_set_temperatures)

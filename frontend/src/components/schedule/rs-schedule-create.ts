@@ -6,6 +6,7 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant } from "../../types";
+import type { ScheduleKind } from "../../utils/schedule-usage";
 import { localize } from "../../utils/localize";
 import { errorText } from "../../utils/errors";
 import { COVER_TEMPLATES, TEMPLATES, emptyWeek } from "../../utils/schedule-week";
@@ -18,8 +19,8 @@ import "../shared/rs-radio-group";
 export class RsScheduleCreate extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ type: String }) public defaultName = "";
-  /** A cover schedule offers cover templates (positions) instead of the heating ones. */
-  @property({ type: String }) public kind: "climate" | "cover" = "climate";
+  /** Schedule kind: climate, ac, humidity, ventilation, or cover. */
+  @property({ type: String }) public kind: ScheduleKind = "climate";
   /** Without its own border, e.g. inside a dialog. */
   @property({ type: Boolean, reflect: true }) public plain = false;
 

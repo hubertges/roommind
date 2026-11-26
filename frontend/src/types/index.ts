@@ -216,6 +216,77 @@ export type HeatPlantType =
 
 export type FuelType = "coal" | "pellet" | "wood" | "gas" | "electricity";
 
+export type BoilerMode = "auto" | "heating" | "summer_dhw_only" | "hold";
+
+export interface RadiatorSensorConfig {
+  entity_id: string;
+  name?: string;
+  area_id?: string;
+  return_entity_id?: string;
+  pipe_length_m?: number;
+}
+
+export interface RadiatorSensorReading {
+  entity_id: string;
+  name: string;
+  area_id?: string;
+  temp: number | null;
+  return_temp: number | null;
+  temp_drop_k: number | null;
+  loss_pct: number | null;
+  pipe_length_m: number | null;
+  loss_k_per_m: number | null;
+  radiator_delta_t: number | null;
+}
+
+export interface HeatPlantWarning {
+  code: string;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  detail: string;
+  value?: number | null;
+  threshold?: number | null;
+}
+
+export interface BoilerRefillLogEntry {
+  ts: number;
+  kg: number;
+  bags: number | null;
+  filled_to_full: boolean;
+  days_since_prev: number | null;
+  avg_kg_24h: number | null;
+}
+
+export interface BoilerModelInfo {
+  n_observations: number;
+  n_heating: number;
+  n_cooling: number;
+  n_idle: number;
+  last_update_at: number | null;
+  confidence: number;
+  mpc_active: boolean;
+  heat_up_rate_c_per_h: number;
+  cool_down_rate_c_per_h: number;
+  learned_efficiency_pct: number;
+  learned_burn_rate_kg_h: number;
+  learned_burn_rate_kg_24h: number;
+  learned_thermal_kw: number;
+  learned_delta_t_k: number;
+  kg_per_day_per_k: number;
+  learned_pipe_loss_pct: number;
+  learned_pipe_drop_k: number;
+  fuel_calibration_factor: number;
+  refill_avg_kg_24h: number | null;
+  temp_mae_c: number | null;
+  temp_bias_c: number | null;
+  recommended_supply_temp: number | null;
+  predicted_autonomy_hours: number | null;
+  calorific_value_mj_kg: number;
+  chemical_kwh_per_kg: number;
+  usable_kwh_per_kg: number;
+  refill_history: BoilerRefillLogEntry[];
+}
+
 export interface HeatPlantConfig {
   id: string;
   name: string;
@@ -225,9 +296,12 @@ export interface HeatPlantConfig {
   parent_plant_id?: string;
   cannot_extinguish?: boolean;
   min_power_pct?: number;
+  boiler_mode?: BoilerMode;
   assigned_devices: string[];
   assigned_rooms: string[];
   source_entity: string;
+  boiler_target_temp_entity?: string;
+  dhw_target_temp_entity?: string;
   target_supply_temp: number;
   idle_supply_temp: number;
   off_mode: "off" | "temperature";
@@ -235,7 +309,21 @@ export interface HeatPlantConfig {
   supply_temp_sensor: string;
   return_temp_sensor: string;
   dhw_temp_sensor: string;
+  dhw_supply_temp_sensor?: string;
   flue_temp_sensor: string;
+  feeder_temp_sensor?: string;
+  feeder_work_time_sensor?: string;
+  feeder_pause_time_sensor?: string;
+  feeder_work_time_s?: number;
+  feeder_pause_time_s?: number;
+  blower_sensor?: string;
+  blower_mode_sensor?: string;
+  daily_fuel_sensor?: string;
+  boiler_room_temp_sensor?: string;
+  flow_rate_l_min?: number;
+  flow_rate_sensor?: string;
+  boiler_water_volume_l?: number;
+  radiator_sensors?: RadiatorSensorConfig[];
   ch_pump_entity: string;
   ch_pump_min_supply_temp: number;
   ch_pump_overrun_temp: number;
@@ -244,6 +332,7 @@ export interface HeatPlantConfig {
   ufh_min_supply_temp?: number;
   ufh_max_supply_temp?: number;
   dhw_pump_entity: string;
+  dhw_circulation_pump_entity?: string;
   dhw_target_temp: number;
   dhw_hysteresis: number;
   dhw_min_supply_delta: number;
@@ -255,6 +344,7 @@ export interface HeatPlantConfig {
   nominal_power_kw: number;
   fuel_price: number;
   currency: string;
+  bag_weight_kg?: number;
   energy_sensor: string;
   fuel_consumption_sensor: string;
   feeder_entity?: string;
@@ -262,6 +352,12 @@ export interface HeatPlantConfig {
   hopper_capacity_kg?: number;
   hopper_level_sensor?: string;
   ash_content_pct?: number;
+  feeder_max_temp?: number;
+  flue_max_temp?: number;
+  return_min_temp?: number;
+  min_boiler_temp_alert?: number;
+  distribution_loss_alert_pct?: number;
+  notify_warnings_enabled?: boolean;
   notify_refill_enabled?: boolean;
   refill_alert_kg?: number;
   refill_alert_pct?: number;
@@ -277,6 +373,11 @@ export interface HeatPlantLive {
   id: string;
   name?: string;
   plant_type?: HeatPlantType;
+  boiler_mode?: BoilerMode;
+  target_supply_temp?: number;
+  idle_supply_temp?: number;
+  dhw_target_temp?: number;
+  recommended_supply_temp?: number | null;
   cannot_extinguish?: boolean;
   in_fire_hold?: boolean;
   priority?: number;
@@ -297,30 +398,57 @@ export interface HeatPlantLive {
   overheat_protect: boolean;
   ufh_overheat_protect?: boolean;
   low_return_warning?: boolean;
+  feeder_overheat_warning?: boolean;
+  flue_high_warning?: boolean;
+  fire_out_warning?: boolean;
+  high_pipe_loss_warning?: boolean;
+  warnings?: HeatPlantWarning[];
   supply_temp: number | null;
   return_temp: number | null;
   ufh_supply_temp?: number | null;
   delta_t: number | null;
   dhw_temp: number | null;
+  dhw_supply_temp?: number | null;
   flue_temp: number | null;
+  feeder_temp?: number | null;
+  boiler_room_temp?: number | null;
+  flow_rate_l_min?: number | null;
+  feeder_work_time_s?: number | null;
+  feeder_pause_time_s?: number | null;
+  feeder_duty_pct?: number | null;
+  blower_pct?: number | null;
+  blower_mode?: string | null;
+  real_efficiency_pct?: number;
+  flue_loss_pct?: number | null;
   ch_pump_active: boolean;
   ch_pump_blocked_cold: boolean;
   ufh_pump_active?: boolean;
   ufh_pump_blocked_cold?: boolean;
   dhw_pump_active: boolean;
   dhw_pump_blocked_cold: boolean;
+  dhw_circulation_pump_active?: boolean;
   demanding_rooms: string[];
   active_devices: string[];
   mean_power_pct: number;
   max_power_pct: number;
   fuel_unit: "kg" | "m³" | "kWh";
-  fuel_source_mode?: "fuel_sensor" | "feeder" | "energy_sensor" | "estimated";
+  fuel_source_mode?:
+    | "fuel_sensor"
+    | "daily_fuel_sensor"
+    | "feeder_cycle"
+    | "feeder"
+    | "hydraulic_delta_t"
+    | "energy_sensor"
+    | "estimated";
   feeder_active?: boolean;
+  bag_weight_kg?: number;
   chemical_kwh_per_kg: number;
   usable_kwh_per_kg: number;
   current_thermal_kw: number;
   current_input_kw: number;
+  delivered_thermal_kw?: number;
   burn_rate_per_h: number;
+  burn_rate_per_24h?: number;
   cost_per_hour: number;
   cost_per_kwh_thermal: number;
   runtime_hours_today: number;
@@ -331,6 +459,8 @@ export interface HeatPlantLive {
   input_kwh_total: number;
   fuel_consumed_today: number;
   fuel_consumed_total: number;
+  total_refilled_kg?: number;
+  total_refilled_bags?: number;
   cost_today: number;
   cost_total: number;
   fuel_remaining_kg?: number | null;
@@ -348,23 +478,55 @@ export interface HeatPlantLive {
   ash_clean_needed?: boolean;
   chimney_clean_needed?: boolean;
   maintenance_alerts?: Array<"refill" | "ash" | "chimney">;
+  radiator_readings?: RadiatorSensorReading[];
+  avg_radiator_temp?: number | null;
+  min_radiator_temp?: number | null;
+  max_radiator_temp?: number | null;
+  distribution_temp_drop_k?: number | null;
+  distribution_loss_pct?: number | null;
+  distribution_loss_kw?: number | null;
+  distribution_loss_kwh_today?: number;
+  distribution_loss_kwh_total?: number;
+  distribution_loss_cost_today?: number;
+  distribution_loss_cost_total?: number;
+  distribution_loss_fuel_kg_today?: number;
+  distribution_loss_fuel_kg_total?: number;
+  model?: BoilerModelInfo;
 }
 
 export interface HeatPlantHistoryPoint {
   ts: number;
   state: string;
   supply_temp: number | null;
+  target_supply_temp?: number | null;
   return_temp: number | null;
   dhw_temp: number | null;
+  dhw_supply_temp?: number | null;
   flue_temp: number | null;
+  feeder_temp?: number | null;
   delta_t: number | null;
   thermal_kw: number | null;
   burn_rate_per_h: number | null;
+  burn_rate_per_24h?: number | null;
+  blower_pct?: number | null;
+  feeder_duty_pct?: number | null;
+  real_efficiency_pct?: number | null;
+  avg_radiator_temp?: number | null;
+  distribution_temp_drop_k?: number | null;
+  distribution_loss_kw?: number | null;
+  distribution_loss_pct?: number | null;
   fuel_consumed_today: number | null;
   fuel_remaining_kg: number | null;
   cost_today: number | null;
   ch_pump_active: boolean;
   dhw_pump_active: boolean;
+}
+
+export interface HeatPlantsAnalyticsData {
+  heat_plants: HeatPlantConfig[];
+  heat_plants_live: Record<string, HeatPlantLive>;
+  heat_plants_history: Record<string, HeatPlantHistoryPoint[]>;
+  outdoor_temp: number | null;
 }
 
 export interface RoomConfig {
@@ -427,6 +589,13 @@ export interface RoomConfig {
   climate_mode: ClimateMode;
   schedules: ScheduleEntry[];
   schedule_selector_entity: string;
+  humidity_schedules?: ScheduleEntry[];
+  humidity_schedule_selector_entity?: string;
+  ac_schedules?: ScheduleEntry[];
+  ac_schedule_selector_entity?: string;
+  ventilation_schedules?: ScheduleEntry[];
+  ventilation_schedule_selector_entity?: string;
+  ventilation_schedule_mode?: "force" | "gate";
   comfort_temp?: number;
   eco_temp?: number;
   comfort_heat: number;
@@ -513,6 +682,11 @@ export interface GlobalSettings {
   coil_dry_fan_mode?: string;
   coil_dry_min_cooling_minutes?: number;
   coil_dry_drain_minutes?: number;
+  humidity_control_enabled?: boolean;
+  humidity_mpc_enabled?: boolean;
+  default_humidity_min?: number;
+  default_humidity_max?: number;
+  humidity_alerts_enabled?: boolean;
   mold_detection_enabled?: boolean;
   mold_humidity_threshold?: number;
   mold_f_rsi?: number;
@@ -703,13 +877,31 @@ export interface ModelDay {
 
 export interface HumidityModelInfo {
   confidence: number;
-  model: Record<string, number>;
+  model: {
+    k_vent?: number;
+    Q_humidify?: number;
+    Q_dehumidify?: number;
+    Q_occupancy?: number;
+    [key: string]: number | undefined;
+  };
   n_samples: number;
   n_observations: number;
+  n_idle?: number;
   n_humidifying: number;
   n_dehumidifying: number;
+  last_update_at?: number | null;
   applicable_modes: string[];
   mpc_active: boolean;
+  prediction_std_idle?: number;
+  prediction_std_humidify?: number;
+  prediction_std_dehumidify?: number;
+  has_occupancy_sensors?: boolean;
+  occupancy_learned?: boolean;
+  current_humidity?: number | null;
+  outdoor_humidity?: number | null;
+  outdoor_humidity_eq?: number | null;
+  day_error_mae?: number | null;
+  day_error_steps?: number;
 }
 
 export interface AnalyticsData {

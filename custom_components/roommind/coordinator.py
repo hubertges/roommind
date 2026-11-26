@@ -604,7 +604,11 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 else None
             )
             self.heat_plants_live = await self._heat_plant_manager.async_process(
-                rooms, room_states, settings, dynamic_elec_price=elec_price
+                rooms,
+                room_states,
+                settings,
+                dynamic_elec_price=elec_price,
+                outdoor_temp=self.outdoor_temp_effective,
             )
             self._ensure_heat_plant_entities(settings.get("heat_plants", []))
             if self._heat_plant_manager.state_dirty and self._thermal_save_count == 0:
@@ -1160,16 +1164,38 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         # Load schedule blocks once — used for both target temp resolution and MPC lookahead.
         from .utils.schedule_utils import (
             cap_cool_only_heat,
+            find_active_block,
             find_rejected_block_temps,
             get_active_schedule_entity,
+            get_active_schedule_entity_for,
             make_target_resolver,
             read_schedule_blocks,
+            sanitize_block_temp,
         )
 
         schedule_entity_id = get_active_schedule_entity(self.hass, room)
         schedule_blocks = (
             await read_schedule_blocks(self.hass, schedule_entity_id, cache=self._schedule_blocks_cache)
             if schedule_entity_id
+            else None
+        )
+
+        # Optional dedicated schedules for humidification and AC (cooling)
+        _, humidity_schedule_eid = get_active_schedule_entity_for(
+            self.hass, room, "humidity_schedules", "humidity_schedule_selector_entity"
+        )
+        humidity_schedule_blocks = (
+            await read_schedule_blocks(self.hass, humidity_schedule_eid, cache=self._schedule_blocks_cache)
+            if humidity_schedule_eid
+            else schedule_blocks
+        )
+
+        _, ac_schedule_eid = get_active_schedule_entity_for(
+            self.hass, room, "ac_schedules", "ac_schedule_selector_entity"
+        )
+        ac_schedule_blocks = (
+            await read_schedule_blocks(self.hass, ac_schedule_eid, cache=self._schedule_blocks_cache)
+            if ac_schedule_eid
             else None
         )
 
@@ -1185,6 +1211,34 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         targets, target_reason = self._resolve_target_temps_and_reason(
             room, settings, schedule_blocks, schedule_entity_id, room_vacant=occupancy_vacant
         )
+        # If dedicated AC schedules are configured and no override/vacation/presence away forces targets,
+        # resolve the cooling side independently from the AC schedule!
+        if ac_schedule_eid and not target_reason:
+            ac_block = find_active_block(ac_schedule_blocks, time.time()) if ac_schedule_blocks else None
+            ac_state = self.hass.states.get(ac_schedule_eid)
+            ac_on = ac_block is not None if ac_schedule_blocks is not None else (
+                ac_state is not None and ac_state.state == "on"
+            )
+            if ac_on:
+                blk_cool = (
+                    sanitize_block_temp(
+                        ac_block.get("cool_temperature", ac_block.get("temperature")),
+                        partial(ha_temp_to_celsius, self.hass),
+                    )
+                    if ac_block
+                    else None
+                )
+                ac_cool_target = (
+                    blk_cool if blk_cool is not None else room.get("comfort_cool", DEFAULT_COMFORT_COOL)
+                )
+            else:
+                ac_cool_target = (
+                    None
+                    if settings.get("schedule_off_action", "eco") == "off"
+                    else room.get("eco_cool", DEFAULT_ECO_COOL)
+                )
+            targets = TargetTemps(heat=targets.heat, cool=ac_cool_target)
+
         # Rooms that opted in move their schedule target with the electricity price; the
         # mold boost below still comes on top
         price_shift = (0.0, 0.0)
@@ -1323,7 +1377,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             area_id=area_id,
             room=room,
             settings=settings,
-            schedule_blocks=schedule_blocks,
+            schedule_blocks=humidity_schedule_blocks,
             current_temp=current_temp,
             current_humidity=current_humidity,
             outdoor_forecast=outdoor_forecast,
@@ -3321,6 +3375,15 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             self._humidity_prediction_forecasts.pop(area_id, None)
             return
 
+        if not settings.get("humidity_control_enabled", True):
+            humidity_control["humidity_high"] = False
+            humidity_control["humidity_low"] = False
+            humidity_control["humidity_action"] = MODE_IDLE
+            humidity_control["humidifying_power"] = 0
+            humidity_control["humidity_mpc_active"] = False
+            self._previous_humidity_modes.pop(area_id, None)
+            return
+
         # Auto-clear expired humidity override
         override_hum = room.get("override_humidify")
         override_dehum = room.get("override_dehumidify")
@@ -3366,6 +3429,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             or room.get("humidity_max") is not None
             or "eco_humidify" in room
             or "eco_dehumidify" in room
+            or bool(room.get("humidity_schedules"))
             or bool(room.get("schedules"))
             or is_humidity_override_active(room)
         )
@@ -3384,6 +3448,11 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             elif humidity_control.get("humidity_high"):
                 prev_h_mode = MODE_DEHUMIDIFYING
 
+        settings_for_h = (
+            settings
+            if settings.get("humidity_mpc_enabled", True)
+            else {**settings, "control_mode": "bangbang"}
+        )
         h_controller = HumidityMPCController(
             hass=self.hass,
             room_config=room,
@@ -3397,7 +3466,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             window_open=False,
             target_resolver=resolver if uses_dynamic_targets else None,
             previous_mode=prev_h_mode,
-            settings=settings,
+            settings=settings_for_h,
             has_external_sensor=bool(room.get("humidity_sensor")),
             q_occupancy=q_occupancy,
             override_active=is_humidity_override_active(room),
@@ -3637,20 +3706,38 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         upper humidity limit also wants it while too humid and the outdoor air dries (#526): one
         controller for both, so neither trigger switches off what the other still needs.
         """
+        from .utils.schedule_utils import get_active_schedule_entity_for
+
         rooms = rooms_with_area(self.hass, self.hass.data[DOMAIN]["store"].get_rooms())
         wanted: dict[str, bool] = {}
         if settings.get("climate_control_active", True):
             for area_id, room in rooms.items():
                 entity_id = room.get("ventilation_entity")
+                vent_sched_eid = get_active_schedule_entity_for(
+                    self.hass,
+                    room,
+                    "ventilation_schedules",
+                    "ventilation_schedule_selector_entity",
+                )
+                vent_mode = str(room.get("ventilation_schedule_mode") or "force")
+                has_sensor_trigger = has_air_quality_sensor(room) or humidity_regulated(room)
                 if (
                     not entity_id
-                    or not (has_air_quality_sensor(room) or humidity_regulated(room))
+                    or not (has_sensor_trigger or vent_sched_eid)
                     or not room.get("climate_control_enabled", True)
                 ):
                     continue
                 rs = room_states.get(area_id) or {}
                 bad = bool(rs.get("air_quality_bad")) or bool(rs.get("humidity_ventilate"))
-                wanted[entity_id] = wanted.get(entity_id, False) or bad
+                want = bad
+                if vent_sched_eid:
+                    sched_state = self.hass.states.get(vent_sched_eid)
+                    sched_on = sched_state is not None and sched_state.state == "on"
+                    if vent_mode == "gate":
+                        want = bad and sched_on
+                    else:
+                        want = bad or sched_on
+                wanted[entity_id] = wanted.get(entity_id, False) or want
         try:
             await self._ventilation.async_reconcile(wanted, time.time())
         except Exception:  # noqa: BLE001
@@ -3674,7 +3761,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         rooms = rooms_with_area(self.hass, self.hass.data[DOMAIN]["store"].get_rooms())
         controlled = (
             {a: r for a, r in rooms.items() if r.get("climate_control_enabled", True)}
-            if settings.get("climate_control_active", True)
+            if settings.get("climate_control_active", True) and settings.get("humidity_control_enabled", True)
             else {}
         )
         wanted, blocked = humidity_device_claims(controlled, room_states, self.hass.states.get)

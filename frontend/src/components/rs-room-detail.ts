@@ -55,7 +55,13 @@ import { NO_OVERRIDE, type EffectiveOverride } from "../utils/override";
 import { tokens } from "../styles/tokens";
 
 type EditableSection =
-  ScheduleCardPart | "devices" | "sensors" | "presence" | "covers" | "heatSource";
+  | ScheduleCardPart
+  | "extraSchedules"
+  | "devices"
+  | "sensors"
+  | "presence"
+  | "covers"
+  | "heatSource";
 
 type RoomFields = Record<string, unknown>;
 
@@ -165,6 +171,28 @@ const ROOM_FIELDS: [string, RoomFieldSync][] = [
   [
     "schedule_selector_entity",
     plain("_scheduleSelectorEntity", (c) => c?.schedule_selector_entity ?? ""),
+  ],
+  ["humidity_schedules", plain("_humiditySchedules", (c) => c?.humidity_schedules ?? [])],
+  [
+    "humidity_schedule_selector_entity",
+    plain("_humidityScheduleSelectorEntity", (c) => c?.humidity_schedule_selector_entity ?? ""),
+  ],
+  ["ac_schedules", plain("_acSchedules", (c) => c?.ac_schedules ?? [])],
+  [
+    "ac_schedule_selector_entity",
+    plain("_acScheduleSelectorEntity", (c) => c?.ac_schedule_selector_entity ?? ""),
+  ],
+  ["ventilation_schedules", plain("_ventilationSchedules", (c) => c?.ventilation_schedules ?? [])],
+  [
+    "ventilation_schedule_selector_entity",
+    plain(
+      "_ventilationScheduleSelectorEntity",
+      (c) => c?.ventilation_schedule_selector_entity ?? "",
+    ),
+  ],
+  [
+    "ventilation_schedule_mode",
+    plain("_ventilationScheduleMode", (c) => c?.ventilation_schedule_mode ?? "force"),
   ],
   ["comfort_heat", plain("_comfortHeat", (c) => c?.comfort_heat ?? c?.comfort_temp ?? 21.0)],
   ["comfort_cool", plain("_comfortCool", (c) => c?.comfort_cool ?? 24.0)],
@@ -323,6 +351,13 @@ export class RsRoomDetail extends LitElement {
   @state() private _climateMode: ClimateMode = "auto";
   @state() private _schedules: ScheduleEntry[] = [];
   @state() private _scheduleSelectorEntity = "";
+  @state() private _humiditySchedules: ScheduleEntry[] = [];
+  @state() private _humidityScheduleSelectorEntity = "";
+  @state() private _acSchedules: ScheduleEntry[] = [];
+  @state() private _acScheduleSelectorEntity = "";
+  @state() private _ventilationSchedules: ScheduleEntry[] = [];
+  @state() private _ventilationScheduleSelectorEntity = "";
+  @state() private _ventilationScheduleMode: "force" | "gate" = "force";
   @state() private _comfortHeat = 21.0;
   @state() private _comfortCool = 24.0;
   @state() private _ecoHeat = 17.0;
@@ -758,6 +793,8 @@ export class RsRoomDetail extends LitElement {
         ></rs-schedule-settings>
       </rs-list-card>
 
+      ${this._renderExtraSchedulesCard()}
+
       <rs-list-card
         .heading=${localize("room.section.devices", l)}
         .aside=${deviceCount ? localize(deviceCount === 1 ? "detail.devices.count_one" : "detail.devices.count", l, { count: deviceCount }) : ""}
@@ -1004,6 +1041,135 @@ export class RsRoomDetail extends LitElement {
             @open-schedule-editor=${this._onOpenScheduleEditor}
           ></rs-schedule-settings>
         </rs-edit-dialog>`;
+      case "extraSchedules": {
+        const isPl = lang.toLowerCase().startsWith("pl");
+        const t = (pl: string, en: string) => (isPl ? pl : en);
+        const humEid = this._humiditySchedules[0]?.entity_id ?? "";
+        const acEid = this._acSchedules[0]?.entity_id ?? "";
+        const ventEid = this._ventilationSchedules[0]?.entity_id ?? "";
+        return html`<rs-edit-dialog
+          open
+          icon="mdi:calendar-multiselect"
+          .heading=${t(
+            "Harmonogramy: Nawilżanie, Klimatyzacja i Wentylacja",
+            "Schedules: Humidification, AC & Ventilation",
+          )}
+          .error=${this._error}
+          @rs-dialog-closed=${this._closeEdit}
+        >
+          <div style="display:flex;flex-direction:column;gap:18px">
+            <section class="group">
+              <h4 class="group-title">${t("Harmonogram nawilżania", "Humidification schedule")}</h4>
+              <ha-entity-picker
+                .hass=${this.hass}
+                .includeDomains=${["schedule"]}
+                .label=${t("Encja harmonogramu nawilżania (schedule.*)", "Humidification schedule entity")}
+                .value=${humEid}
+                @value-changed=${(e: CustomEvent) => {
+                  const v = (e.detail?.value as string) ?? "";
+                  this._humiditySchedules = v ? [{ entity_id: v }] : [];
+                  this._autoSave();
+                }}
+              ></ha-entity-picker>
+              ${
+                humEid
+                  ? html`<ha-button
+                      appearance="plain"
+                      @click=${() =>
+                        void this._onOpenScheduleEditor(
+                          new CustomEvent("open-schedule-editor", {
+                            detail: { entityId: humEid, kind: "humidity" },
+                          }),
+                        )}
+                    >
+                      ${t("Edytuj godziny nawilżania", "Edit humidification blocks")}
+                    </ha-button>`
+                  : nothing
+              }
+            </section>
+
+            <section class="group">
+              <h4 class="group-title">${t("Harmonogram klimatyzacji (AC)", "Air Conditioning (AC) schedule")}</h4>
+              <ha-entity-picker
+                .hass=${this.hass}
+                .includeDomains=${["schedule"]}
+                .label=${t("Encja harmonogramu klimatyzacji (schedule.*)", "AC cooling schedule entity")}
+                .value=${acEid}
+                @value-changed=${(e: CustomEvent) => {
+                  const v = (e.detail?.value as string) ?? "";
+                  this._acSchedules = v ? [{ entity_id: v }] : [];
+                  this._autoSave();
+                }}
+              ></ha-entity-picker>
+              ${
+                acEid
+                  ? html`<ha-button
+                      appearance="plain"
+                      @click=${() =>
+                        void this._onOpenScheduleEditor(
+                          new CustomEvent("open-schedule-editor", {
+                            detail: { entityId: acEid, kind: "ac" },
+                          }),
+                        )}
+                    >
+                      ${t("Edytuj godziny klimatyzacji", "Edit AC blocks")}
+                    </ha-button>`
+                  : nothing
+              }
+            </section>
+
+            <section class="group">
+              <h4 class="group-title">${t("Harmonogram wentylacji", "Ventilation schedule")}</h4>
+              <ha-entity-picker
+                .hass=${this.hass}
+                .includeDomains=${["schedule"]}
+                .label=${t("Encja harmonogramu wentylacji (schedule.*)", "Ventilation schedule entity")}
+                .value=${ventEid}
+                @value-changed=${(e: CustomEvent) => {
+                  const v = (e.detail?.value as string) ?? "";
+                  this._ventilationSchedules = v ? [{ entity_id: v }] : [];
+                  this._autoSave();
+                }}
+              ></ha-entity-picker>
+              ${
+                ventEid
+                  ? html`<rs-segmented
+                        wrap
+                        .label=${t("Tryb harmonogramu wentylacji", "Ventilation schedule mode")}
+                        .options=${[
+                          {
+                            value: "force",
+                            label: t("Włączaj wg harmonogramu", "Run on schedule (force)"),
+                          },
+                          {
+                            value: "gate",
+                            label: t("Tylko zezwalaj (bramka AQ)", "Allow only in schedule (gate)"),
+                          },
+                        ]}
+                        .value=${this._ventilationScheduleMode}
+                        @value-changed=${(e: CustomEvent<{ value: string }>) => {
+                          this._ventilationScheduleMode =
+                            e.detail.value === "gate" ? "gate" : "force";
+                          this._autoSave();
+                        }}
+                      ></rs-segmented>
+                      <ha-button
+                        appearance="plain"
+                        @click=${() =>
+                          void this._onOpenScheduleEditor(
+                            new CustomEvent("open-schedule-editor", {
+                              detail: { entityId: ventEid, kind: "ventilation" },
+                            }),
+                          )}
+                      >
+                        ${t("Edytuj godziny wentylacji", "Edit ventilation blocks")}
+                      </ha-button>`
+                  : nothing
+              }
+            </section>
+          </div>
+        </rs-edit-dialog>`;
+      }
       case "temperatures":
         return html`<rs-edit-dialog
           open
@@ -1265,8 +1431,86 @@ export class RsRoomDetail extends LitElement {
    * The schedule dialog opens the editor page: a pending room save (e.g. the just created
    * helper's assignment) goes out first, the page switch unmounts this element.
    */
+  private _renderExtraSchedulesCard() {
+    const l = this.hass.language;
+    const isPl = l.toLowerCase().startsWith("pl");
+    const t = (pl: string, en: string) => (isPl ? pl : en);
+    const hasAc = this._devices.some((d) => d.type === "ac");
+    const hasHum = Boolean(
+      this._humidifierEntity ||
+        this._dehumidifierEntity ||
+        this._humidityMin != null ||
+        this._humidityMax != null ||
+        this._humiditySchedules.length > 0,
+    );
+    const hasVent = Boolean(this._ventilationEntity || this._ventilationSchedules.length > 0);
+    if (!hasAc && !hasHum && !hasVent) return nothing;
+
+    const labelOf = (list: ScheduleEntry[]) => {
+      const eid = list[0]?.entity_id;
+      if (!eid) return t("Brak (używa głównego lub progów)", "None (uses main schedule or limits)");
+      return (this.hass.states[eid]?.attributes?.friendly_name as string) || eid;
+    };
+
+    return html`<rs-list-card
+      .heading=${t(
+        "Harmonogramy: Nawilżanie / Klimatyzacja / Wentylacja",
+        "Schedules: Humidification / AC / Ventilation",
+      )}
+      @edit-click=${this._openEdit("extraSchedules")}
+    >
+      ${
+        hasHum
+          ? html`<rs-list-row
+              clickable
+              chevron
+              icon="mdi:air-humidifier"
+              .heading=${t("Harmonogram nawilżania", "Humidification schedule")}
+              .secondary=${labelOf(this._humiditySchedules)}
+              @row-click=${this._openEdit("extraSchedules")}
+            ></rs-list-row>`
+          : nothing
+      }
+      ${
+        hasAc
+          ? html`<rs-list-row
+              clickable
+              chevron
+              icon="mdi:snowflake"
+              .heading=${t("Harmonogram klimatyzacji (AC)", "AC cooling schedule")}
+              .secondary=${labelOf(this._acSchedules)}
+              @row-click=${this._openEdit("extraSchedules")}
+            ></rs-list-row>`
+          : nothing
+      }
+      ${
+        hasVent
+          ? html`<rs-list-row
+              clickable
+              chevron
+              icon="mdi:fan"
+              .heading=${t("Harmonogram wentylacji", "Ventilation schedule")}
+              .secondary=${`${labelOf(this._ventilationSchedules)}${
+                this._ventilationSchedules.length > 0
+                  ? ` · ${
+                      this._ventilationScheduleMode === "gate"
+                        ? t("bramka AQ", "gate")
+                        : t("wymuszony", "force")
+                    }`
+                  : ""
+              }`}
+              @row-click=${this._openEdit("extraSchedules")}
+            ></rs-list-row>`
+          : nothing
+      }
+    </rs-list-card>`;
+  }
+
   private async _onOpenScheduleEditor(
-    e: CustomEvent<{ entityId: string; kind?: "climate" | "cover" }>,
+    e: CustomEvent<{
+      entityId: string;
+      kind?: "climate" | "ac" | "humidity" | "ventilation" | "cover";
+    }>,
   ) {
     e.stopPropagation();
     if (this._saveDebounce) {

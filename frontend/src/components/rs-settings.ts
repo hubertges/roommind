@@ -13,6 +13,8 @@ import type {
   RoomConfig,
   NotificationTarget,
   CompressorGroup,
+  HeatPlantConfig,
+  HeatPlantLive,
   RoomWithoutArea,
   PriceStatus,
   PresenceAwayAction,
@@ -158,6 +160,11 @@ const SETTINGS: [keyof GlobalSettings, SettingSync][] = [
   ["coil_dry_fan_mode", plain("coilDryFanMode", "low")],
   ["coil_dry_min_cooling_minutes", plain("coilDryMinCoolingMinutes", 10)],
   ["coil_dry_drain_minutes", plain("coilDryDrainMinutes", 0)],
+  ["humidity_control_enabled", plain("humidityControlEnabled", true)],
+  ["humidity_mpc_enabled", plain("humidityMpcEnabled", true)],
+  ["default_humidity_min", plain("defaultHumidityMin", 40)],
+  ["default_humidity_max", plain("defaultHumidityMax", 60)],
+  ["humidity_alerts_enabled", plain("humidityAlertsEnabled", true)],
   ["mold_detection_enabled", plain("moldDetectionEnabled", false)],
   ["mold_humidity_threshold", plain("moldHumidityThreshold", 70)],
   ["mold_f_rsi", plain("moldFRsi", 0.8)],
@@ -191,6 +198,8 @@ export class RsSettings extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
   @property({ attribute: false }) public roomsWithoutArea: RoomWithoutArea[] = [];
+  @property({ attribute: false }) public heatPlants: HeatPlantConfig[] = [];
+  @property({ attribute: false }) public heatPlantsLive: Record<string, HeatPlantLive> = {};
   @property({ attribute: false }) public priceStatus: PriceStatus | null = null;
   /** Requested category (from the URL); unknown or unavailable ones fall back. */
   @property({ type: String }) public category = "";
@@ -221,6 +230,11 @@ export class RsSettings extends LitElement {
   @state() private _scheduleOffAction: "eco" | "off" = "eco";
   @state() private _valveProtectionEnabled = false;
   @state() private _valveProtectionInterval = 7;
+  @state() private _humidityControlEnabled = true;
+  @state() private _humidityMpcEnabled = true;
+  @state() private _defaultHumidityMin = 40;
+  @state() private _defaultHumidityMax = 60;
+  @state() private _humidityAlertsEnabled = true;
   @state() private _moldDetectionEnabled = false;
   @state() private _moldHumidityThreshold = 70;
   @state() private _moldFRsi = 0.8;
@@ -411,7 +425,7 @@ export class RsSettings extends LitElement {
                 .icon=${c.icon}
                 .iconColor=${attention ? "var(--rs-warn)" : ""}
                 .variant=${attention ? "warn" : "default"}
-                .heading=${localize(c.title, l)}
+                .heading=${this._categoryTitle(c.id, c.title)}
                 .secondary=${summary.text}
                 .status=${summary.on === undefined ? "" : summary.on ? "on" : "off"}
                 .selected=${this.wide && selected === c.id}
@@ -423,6 +437,38 @@ export class RsSettings extends LitElement {
         </section>`;
       })}
     </nav>`;
+  }
+
+  private _categoryTitle(id: SettingsCategoryId, fallbackKey: Parameters<typeof localize>[0]): string {
+    const l = this.hass.language;
+    const isPl = l.toLowerCase().startsWith("pl");
+    if (id === "mold") {
+      return isPl
+        ? "Nawilżanie, pleśń i osuszanie parownika"
+        : "Humidification, mold & evaporator drying";
+    }
+    if (id === "compressor") {
+      return isPl
+        ? "Wspólny system (piec, kotłownia, agregat)"
+        : "Shared system (boiler, outdoor unit)";
+    }
+    return localize(fallbackKey, l);
+  }
+
+  private _categoryIntro(id: SettingsCategoryId, fallbackKey: Parameters<typeof localize>[0]): string {
+    const l = this.hass.language;
+    const isPl = l.toLowerCase().startsWith("pl");
+    if (id === "mold") {
+      return isPl
+        ? "Globalne ustawienia nawilżania (MPC), ochrony przed pleśnią oraz osuszania parownika klimatyzacji."
+        : "Global humidification (MPC), mold risk protection, and AC evaporator drying settings.";
+    }
+    if (id === "compressor") {
+      return isPl
+        ? "Ustawienia pieców i kotłowni (temperatury, tryb, ostrzeżenia) oraz wspólnych grup agregatów i jednostek zewnętrznych."
+        : "Boiler & heat plant settings (temperatures, mode, safety warnings) and shared outdoor unit / compressor groups.";
+    }
+    return localize(fallbackKey, l);
   }
 
   private _renderPage(id: SettingsCategoryId) {
@@ -437,7 +483,7 @@ export class RsSettings extends LitElement {
           </span>
           <div class="page-text">
             <div class="page-title-row">
-              <h2 id="page-title" tabindex="-1">${localize(category.title, l)}</h2>
+              <h2 id="page-title" tabindex="-1">${this._categoryTitle(id, category.title)}</h2>
               ${
                 id === "notifications"
                   ? html`<rs-badge
@@ -447,7 +493,7 @@ export class RsSettings extends LitElement {
                   : nothing
               }
             </div>
-            <p>${localize(category.intro, l)}</p>
+            <p>${this._categoryIntro(id, category.intro)}</p>
           </div>
         </header>
         <div class="page-body">
@@ -536,11 +582,26 @@ export class RsSettings extends LitElement {
         return html`<rs-settings-compressor
           .hass=${this.hass}
           .compressorGroups=${this._compressorGroups}
+          .heatPlants=${this.heatPlants}
+          .heatPlantsLive=${this.heatPlantsLive}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-compressor>`;
       case "coil_dry":
-        return html`<rs-settings-coil-dry
+      case "mold":
+        return html`<rs-settings-mold
           .hass=${this.hass}
+          .rooms=${this.rooms}
+          .humidityControlEnabled=${this._humidityControlEnabled}
+          .humidityMpcEnabled=${this._humidityMpcEnabled}
+          .defaultHumidityMin=${this._defaultHumidityMin}
+          .defaultHumidityMax=${this._defaultHumidityMax}
+          .humidityAlertsEnabled=${this._humidityAlertsEnabled}
+          .moldDetectionEnabled=${this._moldDetectionEnabled}
+          .moldHumidityThreshold=${this._moldHumidityThreshold}
+          .moldFRsi=${this._moldFRsi}
+          .moldSustainedMinutes=${this._moldSustainedMinutes}
+          .moldPreventionEnabled=${this._moldPreventionEnabled}
+          .moldPreventionIntensity=${this._moldPreventionIntensity}
           .coilDryEnabled=${this._coilDryEnabled}
           .coilDryMinutes=${this._coilDryMinutes}
           .coilDryMode=${this._coilDryMode}
@@ -548,17 +609,6 @@ export class RsSettings extends LitElement {
           .coilDryMinCoolingMinutes=${this._coilDryMinCoolingMinutes}
           .coilDryDrainMinutes=${this._coilDryDrainMinutes}
           .availableFanModes=${this._availableAcFanModes()}
-          @setting-changed=${this._onSettingChanged}
-        ></rs-settings-coil-dry>`;
-      case "mold":
-        return html`<rs-settings-mold
-          .hass=${this.hass}
-          .moldDetectionEnabled=${this._moldDetectionEnabled}
-          .moldHumidityThreshold=${this._moldHumidityThreshold}
-          .moldFRsi=${this._moldFRsi}
-          .moldSustainedMinutes=${this._moldSustainedMinutes}
-          .moldPreventionEnabled=${this._moldPreventionEnabled}
-          .moldPreventionIntensity=${this._moldPreventionIntensity}
           @setting-changed=${this._onSettingChanged}
         ></rs-settings-mold>`;
       case "notifications":
@@ -730,7 +780,13 @@ export class RsSettings extends LitElement {
         return { text };
       }
       case "mold": {
+        const isPl = l.toLowerCase().startsWith("pl");
         const parts: string[] = [];
+        if (this._humidityControlEnabled) {
+          parts.push(
+            `${isPl ? "Nawilżanie" : "Humidity"} ${this._defaultHumidityMin}–${this._defaultHumidityMax}%${this._humidityMpcEnabled ? " (MPC)" : ""}`,
+          );
+        }
         if (this._moldDetectionEnabled) {
           parts.push(
             localize("settings.summary.mold_detect", l, {
@@ -746,6 +802,11 @@ export class RsSettings extends LitElement {
             }),
           );
         }
+        if (this._coilDryEnabled) {
+          parts.push(
+            `${isPl ? "Parownik" : "Coil dry"} ${formatMinutes(this._coilDryMinutes, l)}`,
+          );
+        }
         return parts.length ? { text: parts.join(" · "), on: true } : { text: off, on: false };
       }
       case "valve":
@@ -758,21 +819,34 @@ export class RsSettings extends LitElement {
             }
           : { text: off, on: false };
       case "compressor": {
+        const isPl = l.toLowerCase().startsWith("pl");
+        const plants = this.heatPlants.length;
         const groups = this._compressorGroups.length;
-        if (!groups) return { text: localize("settings.summary.compressor_none", l) };
-        const devices = this._compressorGroups.reduce((n, g) => n + g.members.length, 0);
-        return {
-          text: [
+        const parts: string[] = [];
+        if (plants > 0) {
+          parts.push(
+            isPl
+              ? `${count(plants)} ${plants === 1 ? "piec / źródło" : "piece / źródła"}`
+              : `${count(plants)} ${plants === 1 ? "boiler / plant" : "boilers / plants"}`,
+          );
+        }
+        if (groups > 0) {
+          const devices = this._compressorGroups.reduce((n, g) => n + g.members.length, 0);
+          parts.push(
             localize(groups === 1 ? "settings.summary.groups_one" : "settings.summary.groups", l, {
               count: count(groups),
             }),
+          );
+          parts.push(
             localize(
               devices === 1 ? "settings.summary.devices_one" : "settings.summary.devices",
               l,
               { count: count(devices) },
             ),
-          ].join(" · "),
-        };
+          );
+        }
+        if (!parts.length) return { text: localize("settings.summary.compressor_none", l) };
+        return { text: parts.join(" · "), on: plants > 0 || groups > 0 };
       }
       case "coil_dry":
         return this._coilDryEnabled

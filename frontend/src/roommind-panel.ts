@@ -72,7 +72,13 @@ export class RoomMindPanel extends LitElement {
   @state() private _scheduleEntity: string | null = null;
   @state() private _scheduleRoom = "";
   /** "cover" / "climate" when the opener knew the kind, "" = the editor tells from its use. */
-  @state() private _scheduleKind: "" | "climate" | "cover" = "";
+  @state() private _scheduleKind:
+    | ""
+    | "climate"
+    | "ac"
+    | "humidity"
+    | "ventilation"
+    | "cover" = "";
   @state() private _scheduleOffAction: "eco" | "off" = "eco";
   /** The open room came from its analytics page; back returns there. */
   @state() private _roomFromAnalytics = false;
@@ -642,10 +648,14 @@ export class RoomMindPanel extends LitElement {
       .hass=${this.hass}
       .rooms=${this._rooms}
       .roomsWithoutArea=${this._roomsWithoutArea}
+      .heatPlants=${this._heatPlants}
+      .heatPlantsLive=${this._heatPlantsLive}
       .priceStatus=${this._priceStatus}
       .category=${this._settingsCategory}
       .wide=${this._wide}
       @settings-category-changed=${this._onSettingsCategoryChanged}
+      @open-heat-plants=${() => this._onTabClicked("heat_plants")}
+      @heat-plants-updated=${() => void this._loadRooms()}
     ></rs-settings>`;
   }
 
@@ -1058,7 +1068,14 @@ export class RoomMindPanel extends LitElement {
       const query = new URLSearchParams(window.location.search);
       this._scheduleRoom = query.get("room") ?? "";
       const kind = query.get("kind");
-      this._scheduleKind = kind === "cover" || kind === "climate" ? kind : "";
+      this._scheduleKind =
+        kind === "cover" ||
+        kind === "climate" ||
+        kind === "ac" ||
+        kind === "humidity" ||
+        kind === "ventilation"
+          ? kind
+          : "";
       this._activeTab = this._scheduleRoom ? "areas" : "schedules";
     } else if (path === "/schedules") {
       this._activeTab = "schedules";

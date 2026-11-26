@@ -8,9 +8,12 @@ import type {
   CompressorGroup,
   ConflictResolution,
   MasterOffMode,
+  HeatPlantConfig,
+  HeatPlantLive,
+  BoilerMode,
 } from "../../types";
 import { localize, type TranslationKey } from "../../utils/localize";
-import { getSelectValue } from "../../utils/events";
+import { fireSaveStatus, getSelectValue } from "../../utils/events";
 import "../shared/rs-confirm-button";
 import "../shared/rs-icon-button";
 import "../shared/rs-edit-dialog";
@@ -21,7 +24,7 @@ import "../shared/rs-info-icon";
 import "../shared/rs-segmented";
 import { inputStyles } from "../../styles/input-styles";
 import { formStyles } from "../../styles/form-styles";
-import { toCelsius } from "../../utils/temperature";
+import { formatTempLocale, tempUnit, toCelsius } from "../../utils/temperature";
 import { alertStyles } from "../../styles/tokens";
 import { RsSettingsBase } from "./rs-settings-base";
 
@@ -54,9 +57,21 @@ const MASTER_DOMAINS = ["climate", "switch", "input_boolean"];
 export class RsSettingsCompressor extends RsSettingsBase {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ type: Array }) public compressorGroups: CompressorGroup[] = [];
+  @property({ attribute: false }) public heatPlants: HeatPlantConfig[] = [];
+  @property({ attribute: false }) public heatPlantsLive: Record<string, HeatPlantLive> = {};
 
   /** Id of the group whose dialog is open. */
   @state() private _editId: string | null = null;
+  /** Id of the boiler/heat plant whose quick-settings dialog is open. */
+  @state() private _editPlantId: string | null = null;
+
+  private get _isPl(): boolean {
+    return (this.hass?.language ?? "en").toLowerCase().startsWith("pl");
+  }
+
+  private _t(pl: string, en: string): string {
+    return this._isPl ? pl : en;
+  }
 
   static styles = [
     ...RsSettingsBase.settingsBaseStyles,
@@ -66,6 +81,18 @@ export class RsSettingsCompressor extends RsSettingsBase {
     css`
       .dialog-body {
         --rs-form-inline: var(--rs-space-6);
+      }
+      .subsection-heading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 var(--rs-space-2);
+        font-size: 13px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+        color: var(--secondary-text-color);
+        --mdc-icon-size: 17px;
       }
       .members {
         display: flex;
@@ -99,15 +126,53 @@ export class RsSettingsCompressor extends RsSettingsBase {
     const l = this.hass.language;
     const groups = this.compressorGroups;
     const editing = groups.findIndex((g) => g.id === this._editId);
+    const editingPlant = this.heatPlants.find((p) => p.id === this._editPlantId);
+
     return html`
-      ${
-        groups.length
-          ? html`<div class="settings-section first">
-              ${groups.map((group, idx) => this._renderGroupRow(group, idx))}
-            </div>`
-          : nothing
-      }
-      <div class="settings-section ${groups.length ? "" : "first"}">
+      <!-- Section 1: Boilers & Heat Plants -->
+      <div class="settings-section first">
+        <h3 class="subsection-heading">
+          <ha-icon icon="mdi:fire"></ha-icon>
+          <span>${this._t("Piece i źródła ciepła (Kotłownia)", "Boilers & Heat Plants")}</span>
+        </h3>
+        ${
+          this.heatPlants.length > 0
+            ? this.heatPlants.map((plant) => this._renderPlantRow(plant))
+            : html`<p class="draft-note">
+                ${this._t(
+                  "Brak skonfigurowanych pieców / źródeł ciepła. Otwórz panel Kotłownia, aby dodać piec na ekogroszek, kocioł gazowy, kominek lub pompę ciepła.",
+                  "No boilers or heat plants configured yet. Open the Boiler Room tab to add a boiler, fireplace, or heat pump.",
+                )}
+              </p>`
+        }
+        <rs-list-row
+          clickable
+          plain-icon
+          chevron
+          variant="primary"
+          icon="mdi:fire-circle"
+          .heading=${this._t(
+            "Otwórz pełną konfigurację kotłowni i czujników pieca",
+            "Open full Boiler Room & sensor configuration",
+          )}
+          .secondary=${this._t(
+            "Czujniki sterownika, kaloryfery, zasypy worków, pompy C.O./CWU i powiadomienia",
+            "Controller sensors, radiator loss sensors, fuel refills, pumps & alerts",
+          )}
+          @row-click=${() =>
+            this.dispatchEvent(
+              new CustomEvent("open-heat-plants", { bubbles: true, composed: true }),
+            )}
+        ></rs-list-row>
+      </div>
+
+      <!-- Section 2: Shared Compressor / Outdoor Unit Groups -->
+      <div class="settings-section">
+        <h3 class="subsection-heading">
+          <ha-icon icon="mdi:heat-pump-outline"></ha-icon>
+          <span>${this._t("Grupy wspólnego agregatu / sterowania nadrzędnego", "Shared Outdoor Unit / Compressor Groups")}</span>
+        </h3>
+        ${groups.map((group, idx) => this._renderGroupRow(group, idx))}
         <rs-list-row
           clickable
           plain-icon
@@ -118,8 +183,188 @@ export class RsSettingsCompressor extends RsSettingsBase {
           @row-click=${this._addGroup}
         ></rs-list-row>
       </div>
+
       ${editing >= 0 ? this._renderDialog(groups[editing], editing) : nothing}
+      ${editingPlant ? this._renderPlantQuickDialog(editingPlant) : nothing}
     `;
+  }
+
+  private _renderPlantRow(plant: HeatPlantConfig) {
+    const lv = this.heatPlantsLive[plant.id];
+    const unit = tempUnit(this.hass);
+    const parts: string[] = [];
+    if (lv?.supply_temp != null) {
+      parts.push(
+        `${this._t("Kocioł", "Boiler")}: ${formatTempLocale(lv.supply_temp, this.hass, 1, 1)} / ${formatTempLocale(plant.target_supply_temp, this.hass, 0, 1)}${unit}`,
+      );
+    } else {
+      parts.push(
+        `${this._t("Zadana", "Target")}: ${formatTempLocale(plant.target_supply_temp, this.hass, 0, 1)}${unit}`,
+      );
+    }
+    if (plant.dhw_temp_sensor || lv?.dhw_temp != null) {
+      parts.push(
+        `CWU: ${lv?.dhw_temp != null ? formatTempLocale(lv.dhw_temp, this.hass, 1, 1) : "—"} / ${formatTempLocale(plant.dhw_target_temp, this.hass, 0, 1)}${unit}`,
+      );
+    }
+    const radCount = plant.radiator_sensors?.length ?? 0;
+    if (radCount > 0) {
+      parts.push(`${radCount} ${this._t("czujn. kaloryferów", "radiator sensors")}`);
+    }
+    const warnCount = lv?.warnings?.length ?? 0;
+    if (warnCount > 0) {
+      parts.push(`⚠ ${warnCount} ${this._t("ostrzeżeń", "warnings")}`);
+    }
+    return html`
+      <rs-list-row
+        clickable
+        chevron
+        icon=${plant.plant_type === "fireplace" ? "mdi:fireplace" : "mdi:water-boiler"}
+        .heading=${plant.name || plant.id}
+        .secondary=${parts.join(" · ")}
+        .status=${plant.enabled ? "on" : "off"}
+        .variant=${warnCount > 0 ? "warn" : "default"}
+        @row-click=${() => (this._editPlantId = plant.id)}
+      ></rs-list-row>
+    `;
+  }
+
+  private _renderPlantQuickDialog(plant: HeatPlantConfig) {
+    const unit = tempUnit(this.hass);
+    return html`<rs-edit-dialog
+      open
+      icon="mdi:fire"
+      .heading=${`${plant.name} — ${this._t("Nastawy i ostrzeżenia pieca", "Boiler Setpoints & Warnings")}`}
+      @rs-dialog-closed=${() => (this._editPlantId = null)}
+    >
+      <div class="dialog-body">
+        <section class="group">
+          <rs-field .label=${this._t("Tryb pracy pieca", "Boiler operating mode")}>
+            <rs-segmented
+              wrap
+              .label=${this._t("Tryb pracy", "Boiler mode")}
+              .options=${[
+                { value: "auto", label: this._t("Auto", "Auto") },
+                { value: "heating", label: this._t("Zima / Grzanie", "Winter") },
+                { value: "summer_dhw_only", label: this._t("Lato (CWU)", "Summer (DHW)") },
+                { value: "hold", label: this._t("Podtrzymanie", "Hold") },
+              ]}
+              .value=${plant.boiler_mode ?? "auto"}
+              @value-changed=${(e: CustomEvent<{ value: string }>) =>
+                void this._savePlantPatch(plant.id, { boiler_mode: e.detail.value as BoilerMode })}
+            ></rs-segmented>
+          </rs-field>
+
+          ${numberRow({
+            hass: this.hass,
+            label: this._t("Zadana temperatura kotła (C.O.)", "Target boiler supply temperature"),
+            unit,
+            min: 20,
+            max: 88,
+            value: plant.target_supply_temp,
+            onChange: (v) => void this._savePlantPatch(plant.id, { target_supply_temp: v }),
+          })}
+          ${numberRow({
+            hass: this.hass,
+            label: this._t("Temperatura w podtrzymaniu / czuwaniu", "Fire-hold / idle temperature"),
+            unit,
+            min: 15,
+            max: 75,
+            value: plant.idle_supply_temp,
+            onChange: (v) => void this._savePlantPatch(plant.id, { idle_supply_temp: v }),
+          })}
+          ${numberRow({
+            hass: this.hass,
+            label: this._t("Zadana temperatura CWU", "Target DHW temperature"),
+            unit,
+            min: 30,
+            max: 75,
+            value: plant.dhw_target_temp,
+            onChange: (v) => void this._savePlantPatch(plant.id, { dhw_target_temp: v }),
+          })}
+        </section>
+
+        <section class="group">
+          <h3 class="group-title">${this._t("Ostrzeżenia i powiadomienia pieca", "Boiler Warnings & Alerts")}</h3>
+          <rs-list-row
+            switch
+            wrap
+            .heading=${this._t("Powiadomienia o ostrzeżeniach pieca", "Send boiler warning notifications")}
+            .checked=${plant.notify_warnings_enabled ?? true}
+            @toggle-changed=${(e: CustomEvent<boolean>) =>
+              void this._savePlantConfigPatch(plant.id, { notify_warnings_enabled: e.detail })}
+          ></rs-list-row>
+          ${numberRow({
+            hass: this.hass,
+            label: this._t("Alarm temp. podajnika (cofnięcie żaru)", "Feeder burn-back alarm temp"),
+            unit,
+            min: 35,
+            max: 95,
+            value: plant.feeder_max_temp ?? 60,
+            onChange: (v) => void this._savePlantConfigPatch(plant.id, { feeder_max_temp: v }),
+          })}
+          ${numberRow({
+            hass: this.hass,
+            label: this._t("Alarm temp. spalin", "High flue temp alarm"),
+            unit,
+            min: 100,
+            max: 450,
+            value: plant.flue_max_temp ?? 220,
+            onChange: (v) => void this._savePlantConfigPatch(plant.id, { flue_max_temp: v }),
+          })}
+          ${numberRow({
+            hass: this.hass,
+            label: this._t("Ostrzeżenie strat przesyłu na rurach", "Pipe distribution loss warning"),
+            unit: "%",
+            min: 5,
+            max: 60,
+            value: plant.distribution_loss_alert_pct ?? 20,
+            onChange: (v) =>
+              void this._savePlantConfigPatch(plant.id, { distribution_loss_alert_pct: v }),
+          })}
+        </section>
+      </div>
+    </rs-edit-dialog>`;
+  }
+
+  private async _savePlantPatch(
+    plantId: string,
+    payload: {
+      target_supply_temp?: number;
+      idle_supply_temp?: number;
+      dhw_target_temp?: number;
+      boiler_mode?: BoilerMode;
+    },
+  ) {
+    this.heatPlants = this.heatPlants.map((p) => (p.id === plantId ? { ...p, ...payload } : p));
+    fireSaveStatus(this, "saving");
+    try {
+      await this.hass.callWS({
+        type: "roommind/heat_plants/set_temperatures",
+        plant_id: plantId,
+        ...payload,
+      });
+      fireSaveStatus(this, "saved");
+      this.dispatchEvent(new CustomEvent("heat-plants-updated", { bubbles: true, composed: true }));
+    } catch {
+      fireSaveStatus(this, "error");
+    }
+  }
+
+  private async _savePlantConfigPatch(plantId: string, patch: Partial<HeatPlantConfig>) {
+    const next = this.heatPlants.map((p) => (p.id === plantId ? { ...p, ...patch } : p));
+    this.heatPlants = next;
+    fireSaveStatus(this, "saving");
+    try {
+      await this.hass.callWS({
+        type: "roommind/settings/save",
+        heat_plants: next,
+      });
+      fireSaveStatus(this, "saved");
+      this.dispatchEvent(new CustomEvent("heat-plants-updated", { bubbles: true, composed: true }));
+    } catch {
+      fireSaveStatus(this, "error");
+    }
   }
 
   private _groupLabel(group: CompressorGroup, idx: number): string {

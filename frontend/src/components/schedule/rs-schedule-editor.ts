@@ -104,8 +104,14 @@ export class RsScheduleEditor extends LitElement {
   /** Room the editor was opened from ("" for a deep link without room). */
   @property({ type: String }) public roomId = "";
   @property({ attribute: false }) public rooms: Record<string, RoomConfig> = {};
-  /** "cover" for a cover schedule, "climate" for a room temperature one, "" = from its use. */
-  @property({ type: String }) public kind: "" | "climate" | "cover" = "";
+  /** "cover", "climate", "ac", "humidity", "ventilation", or "" = infer from usage. */
+  @property({ type: String }) public kind:
+    | ""
+    | "climate"
+    | "ac"
+    | "humidity"
+    | "ventilation"
+    | "cover" = "";
   @property({ type: String }) public scheduleOffAction: "eco" | "off" = "eco";
 
   @state() private _loaded: LoadedSchedule | null = null;
@@ -1260,6 +1266,7 @@ export class RsScheduleEditor extends LitElement {
       .nextDayName=${names[(open.day + 1) % 7]}
       .blockKey=${open.key}
       .cover=${this._cover}
+      .scheduleKind=${this.kind}
       .gateOnly=${this._cover && users.length > 0 && users.every((u) => u.coverMode === "gate")}
       @block-position=${this._onFormPosition}
       @block-times=${this._onFormTimes}

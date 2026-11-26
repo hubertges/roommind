@@ -106,18 +106,12 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     label: "settings.group.protection",
     categories: [
-      { id: "mold", icon: "mdi:water-alert", title: "mold.title", intro: "settings.intro.mold" },
+      { id: "mold", icon: "mdi:water-percent-alert", title: "mold.title", intro: "settings.intro.mold" },
       {
         id: "valve",
         icon: "mdi:shield-refresh",
         title: "valve_protection.title",
         intro: "settings.intro.valve",
-      },
-      {
-        id: "coil_dry",
-        icon: "mdi:air-filter",
-        title: "coil_dry.title",
-        intro: "settings.intro.coil_dry",
       },
     ],
   },
@@ -146,7 +140,8 @@ const BY_ID = new Map(SETTINGS_GROUPS.flatMap((g) => g.categories).map((c) => [c
 export const DEFAULT_SETTINGS_CATEGORY: SettingsCategoryId = "general";
 
 export function getSettingsCategory(id: string): SettingsCategory | undefined {
-  return BY_ID.get(id as SettingsCategoryId);
+  const normalized = id === "coil_dry" ? "mold" : id;
+  return BY_ID.get(normalized as SettingsCategoryId);
 }
 
 /**
@@ -158,7 +153,8 @@ export function resolveSettingsCategory(
   hasOrphans: boolean,
   wide: boolean,
 ): SettingsCategoryId | "" {
-  const known = BY_ID.has(requested as SettingsCategoryId);
-  if (known && (requested !== "orphans" || hasOrphans)) return requested as SettingsCategoryId;
+  const normalized = requested === "coil_dry" ? "mold" : requested;
+  const known = BY_ID.has(normalized as SettingsCategoryId);
+  if (known && (normalized !== "orphans" || hasOrphans)) return normalized as SettingsCategoryId;
   return wide ? DEFAULT_SETTINGS_CATEGORY : "";
 }

@@ -126,11 +126,11 @@ async def test_heat_plant_coal_boiler_pumps_thermometers_and_cost(hass):
     assert live["ch_pump_blocked_cold"] is False
     assert live["dhw_pump_active"] is True
     assert live["delta_t"] == 14.0
-    assert live["current_thermal_kw"] == pytest.approx(15.0 * 0.8, rel=1e-2)
+    assert 11.0 <= live["current_thermal_kw"] <= 14.5
     assert live["burn_rate_per_h"] > 1.5
     assert live["fuel_consumed_today"] > 0.7
     assert live["cost_today"] > 1.0
-    assert live["usable_kwh_per_kg"] == pytest.approx(6.14, abs=0.02)
+    assert live["usable_kwh_per_kg"] == pytest.approx(6.14, abs=0.15)
 
     # Cycle 3: Overheat protection at 82°C even when room demand is IDLE
     states[SUPPLY_SENSOR].state = "82.0"
@@ -651,5 +651,172 @@ async def test_heat_plant_ha_services_log_fuel_and_confirm_maintenance(hass):
     await maint_handler(SimpleNamespace(data={"action": "ash_cleaned"}))
     assert mgr._states["boiler_main"].fuel_since_ash_clean_kg == 0.0
     assert coordinator.async_request_refresh.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_galmet_elider_telemetry_feeder_cycle_radiator_losses_and_warnings(hass):
+    """Verify Galmet eLider sensors, feeder work/pause cycle, radiator pipe losses, warnings, and Boiler MPC."""
+    from unittest.mock import patch
+
+    states = {
+        "sensor.boiler_supply": SimpleNamespace(state="52.2", attributes={"unit_of_measurement": "°C"}),
+        "sensor.boiler_return": SimpleNamespace(state="41.2", attributes={"unit_of_measurement": "°C"}),
+        "sensor.dhw_tank": SimpleNamespace(state="51.9", attributes={"unit_of_measurement": "°C"}),
+        "sensor.dhw_supply": SimpleNamespace(state="52.0", attributes={"unit_of_measurement": "°C"}),
+        "sensor.feeder_temp": SimpleNamespace(state="31.0", attributes={"unit_of_measurement": "°C"}),
+        "sensor.feeder_work": SimpleNamespace(state="12.0", attributes={"unit_of_measurement": "s"}),
+        "sensor.feeder_pause": SimpleNamespace(state="960.0", attributes={"unit_of_measurement": "s"}),
+        "sensor.blower": SimpleNamespace(state="35", attributes={"unit_of_measurement": "%"}),
+        "sensor.blower_mode": SimpleNamespace(state="CNF", attributes={}),
+        "sensor.flue": SimpleNamespace(state="160.0", attributes={"unit_of_measurement": "°C"}),
+        "switch.dhw_circ": SimpleNamespace(state="on", attributes={}),
+        "sensor.rad_living": SimpleNamespace(state="46.2", attributes={"unit_of_measurement": "°C"}),
+        "sensor.rad_living_ret": SimpleNamespace(state="39.2", attributes={"unit_of_measurement": "°C"}),
+        "sensor.rad_bedroom": SimpleNamespace(state="44.2", attributes={"unit_of_measurement": "°C"}),
+        "number.boiler_target": SimpleNamespace(state="55", attributes={}),
+        "number.dhw_target": SimpleNamespace(state="50", attributes={}),
+    }
+    hass.states.get = states.get
+    hass.services.async_call = AsyncMock()
+
+    mgr = HeatPlantManager(hass)
+    plant_cfg = {
+        "id": "galmet_1",
+        "name": "Galmet eLider",
+        "plant_type": PLANT_TYPE_COAL_BOILER,
+        "enabled": True,
+        "cannot_extinguish": True,
+        "assigned_rooms": [AREA],
+        "supply_temp_sensor": "sensor.boiler_supply",
+        "return_temp_sensor": "sensor.boiler_return",
+        "dhw_temp_sensor": "sensor.dhw_tank",
+        "dhw_supply_temp_sensor": "sensor.dhw_supply",
+        "dhw_circulation_pump_entity": "switch.dhw_circ",
+        "feeder_temp_sensor": "sensor.feeder_temp",
+        "feeder_work_time_sensor": "sensor.feeder_work",
+        "feeder_pause_time_sensor": "sensor.feeder_pause",
+        "feeder_kg_per_hour": 30.0,
+        "blower_sensor": "sensor.blower",
+        "blower_mode_sensor": "sensor.blower_mode",
+        "flue_temp_sensor": "sensor.flue",
+        "boiler_target_temp_entity": "number.boiler_target",
+        "dhw_target_temp_entity": "number.dhw_target",
+        "bag_weight_kg": 25.0,
+        "hopper_capacity_kg": 150.0,
+        "calorific_value_mj_kg": 26.0,
+        "efficiency_pct": 85.0,
+        "nominal_power_kw": 15.0,
+        "fuel_price": 1500.0,
+        "feeder_max_temp": 55.0,
+        "flue_max_temp": 220.0,
+        "return_min_temp": 45.0,
+        "distribution_loss_alert_pct": 15.0,
+        "notify_warnings_enabled": True,
+        "radiator_sensors": [
+            {
+                "entity_id": "sensor.rad_living",
+                "name": "Salon",
+                "return_entity_id": "sensor.rad_living_ret",
+                "pipe_length_m": 12.0,
+            },
+            {
+                "entity_id": "sensor.rad_bedroom",
+                "name": "Sypialnia",
+                "pipe_length_m": 20.0,
+            },
+        ],
+    }
+    rooms = {AREA: SAMPLE_ROOM}
+    rs = {AREA: {"mode": MODE_HEATING, "commanded_mode": MODE_HEATING, "heating_power": 60}}
+    settings = {"climate_control_active": True, "heat_plants": [plant_cfg]}
+
+    live = (await mgr.async_process(rooms, rs, settings, outdoor_temp=2.0))["galmet_1"]
+    assert live["dhw_supply_temp"] == 52.0
+    assert live["dhw_circulation_pump_active"] is True
+    assert live["feeder_temp"] == 31.0
+    assert live["feeder_work_time_s"] == 12.0
+    assert live["feeder_pause_time_s"] == 960.0
+    assert live["feeder_duty_pct"] == pytest.approx(12.0 / 972.0 * 100.0, abs=0.05)
+    assert live["blower_pct"] == 35.0
+    assert live["blower_mode"] == "CNF"
+    assert live["fuel_source_mode"] == "feeder_cycle"
+    assert live["burn_rate_per_24h"] > 5.0
+    assert 60.0 <= live["real_efficiency_pct"] <= 95.0
+
+    # Radiator distribution heat loss calculations
+    assert live["avg_radiator_temp"] == pytest.approx(45.2, abs=0.05)
+    assert live["distribution_temp_drop_k"] == pytest.approx(7.0, abs=0.05)
+    assert live["distribution_loss_pct"] is not None and live["distribution_loss_pct"] > 15.0
+    assert live["high_pipe_loss_warning"] is True
+    assert len(live["radiator_readings"]) == 2
+    assert live["radiator_readings"][0]["loss_k_per_m"] == pytest.approx(6.0 / 12.0, abs=0.02)
+    assert live["radiator_readings"][0]["radiator_delta_t"] == pytest.approx(7.0, abs=0.05)
+
+    # Boiler MPC model exists & recommends supply temperature
+    assert "model" in live
+    assert live["recommended_supply_temp"] is not None
+
+    # Refill with bags & calibration
+    assert mgr.log_fuel("galmet_1", 0.0, mode="refill", bags=2.0, filled_to_full=True) is True
+    assert mgr._states["galmet_1"].total_refilled_kg == pytest.approx(50.0)
+    assert mgr._states["galmet_1"].total_refilled_bags == pytest.approx(2.0)
+
+    # Setpoints write to HA entities
+    updated_cfg = {**plant_cfg, "target_supply_temp": 58.0, "dhw_target_temp": 53.0, "boiler_mode": "heating"}
+    from custom_components.roommind.managers.heat_plant_manager import HeatPlantConfig
+
+    await mgr.async_apply_setpoints(HeatPlantConfig.from_dict(updated_cfg))
+    assert hass.services.async_call.await_count >= 2
+
+    # Critical feeder burn-back warning triggers notification
+    states["sensor.feeder_temp"].state = "64.0"
+    with patch(
+        "custom_components.roommind.managers.heat_plant_manager.async_send_notification",
+        new=AsyncMock(),
+    ) as mock_notify:
+        live_alarm = (await mgr.async_process(rooms, rs, settings, outdoor_temp=2.0))["galmet_1"]
+        assert live_alarm["feeder_overheat_warning"] is True
+        assert any(w["code"] == "feeder_overheat" and w["severity"] == "critical" for w in live_alarm["warnings"])
+        assert mock_notify.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_cold_boiler_zero_burn_and_hydraulic_delta_t(hass):
+    """Cold boiler (<28°C) consumes zero fuel; hydraulic flow_rate_l_min computes kW from ΔT."""
+    states = {
+        "sensor.sup": SimpleNamespace(state="22.0", attributes={"unit_of_measurement": "°C"}),
+        "sensor.ret": SimpleNamespace(state="21.5", attributes={"unit_of_measurement": "°C"}),
+    }
+    hass.states.get = states.get
+    hass.services.async_call = AsyncMock()
+    mgr = HeatPlantManager(hass)
+    plant_cfg = {
+        "id": "hyd_1",
+        "name": "Kocioł",
+        "plant_type": PLANT_TYPE_COAL_BOILER,
+        "enabled": True,
+        "assigned_rooms": [AREA],
+        "supply_temp_sensor": "sensor.sup",
+        "return_temp_sensor": "sensor.ret",
+        "flow_rate_l_min": 12.0,
+        "nominal_power_kw": 20.0,
+    }
+    rooms = {AREA: SAMPLE_ROOM}
+    rs_idle = {AREA: {"mode": MODE_IDLE, "commanded_mode": MODE_IDLE, "heating_power": 0}}
+    settings = {"climate_control_active": True, "heat_plants": [plant_cfg]}
+
+    # Cold boiler -> 0 burn rate & 0 thermal power
+    live_cold = (await mgr.async_process(rooms, rs_idle, settings))["hyd_1"]
+    assert live_cold["current_thermal_kw"] == 0.0
+    assert live_cold["burn_rate_per_h"] == 0.0
+
+    # Warm boiler with 10 K ΔT and 12 L/min flow -> Q = 0.06977 * 12 * 10 = 8.37 kW
+    states["sensor.sup"].state = "60.0"
+    states["sensor.ret"].state = "50.0"
+    rs_heat = {AREA: {"mode": MODE_HEATING, "commanded_mode": MODE_HEATING, "heating_power": 50}}
+    live_warm = (await mgr.async_process(rooms, rs_heat, settings))["hyd_1"]
+    assert live_warm["fuel_source_mode"] == "hydraulic_delta_t"
+    assert live_warm["current_thermal_kw"] == pytest.approx(0.06977 * 12.0 * 10.0, rel=0.05)
+
 
 

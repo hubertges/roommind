@@ -179,15 +179,26 @@ def _plant_csv_to_points(rows: list[dict]) -> list[dict]:
                 "ts": ts,
                 "state": row.get("state", ""),
                 "supply_temp": _safe_float(row.get("supply_temp", "")),
+                "target_supply_temp": _safe_float(row.get("target_supply_temp", "")),
                 "return_temp": _safe_float(row.get("return_temp", "")),
                 "dhw_temp": _safe_float(row.get("dhw_temp", "")),
+                "dhw_supply_temp": _safe_float(row.get("dhw_supply_temp", "")),
                 "flue_temp": _safe_float(row.get("flue_temp", "")),
+                "feeder_temp": _safe_float(row.get("feeder_temp", "")),
                 "delta_t": _safe_float(row.get("delta_t", "")),
+                "blower_pct": _safe_float(row.get("blower_pct", "")),
+                "feeder_duty_pct": _safe_float(row.get("feeder_duty_pct", "")),
+                "real_efficiency_pct": _safe_float(row.get("real_efficiency_pct", "")),
                 "thermal_kw": _safe_float(row.get("thermal_kw", "")),
                 "burn_rate_per_h": _safe_float(row.get("burn_rate_per_h", "")),
+                "burn_rate_per_24h": _safe_float(row.get("burn_rate_per_24h", "")),
                 "fuel_consumed_today": _safe_float(row.get("fuel_consumed_today", "")),
                 "fuel_remaining_kg": _safe_float(row.get("fuel_remaining_kg", "")),
                 "cost_today": _safe_float(row.get("cost_today", "")),
+                "avg_radiator_temp": _safe_float(row.get("avg_radiator_temp", "")),
+                "distribution_temp_drop_k": _safe_float(row.get("distribution_temp_drop_k", "")),
+                "distribution_loss_kw": _safe_float(row.get("distribution_loss_kw", "")),
+                "distribution_loss_pct": _safe_float(row.get("distribution_loss_pct", "")),
                 "ch_pump_active": row.get("ch_pump_active", "") in ("True", "true", "1"),
                 "dhw_pump_active": row.get("dhw_pump_active", "") in ("True", "true", "1"),
             }
@@ -475,18 +486,46 @@ async def build_analytics_data(
             }
         h_mgr = getattr(coordinator, "_humidity_model_manager", None)
         if h_mgr and area_id in h_mgr._estimators:
+            from ..control.humidity_model import HumidityEKF, equivalent_indoor_rh
+
             h_est = h_mgr._estimators[area_id]
             h_rc = h_est.get_model()
             live = coordinator.rooms.get(area_id, {})
+            h_pred_idle = h_est.prediction_std(0.0, 50.0, 40.0, 5.0)
+            h_pred_hum = h_est.prediction_std(h_rc.Q_humidify, 40.0, 30.0, 5.0)
+            h_pred_dehum = h_est.prediction_std(-h_rc.Q_dehumidify, 65.0, 55.0, 5.0)
+            has_occ = len(room_config.get("occupancy_sensors", [])) > 0
+            h_occ_learned = (
+                len(h_est._P) > 4
+                and h_est._P[4][4] < LEARNED_VARIANCE_SHARE * HumidityEKF._p_init_diag()[4]
+            )
+            h_day_err, h_day_n = h_est._day_error()
+            outdoor_eq = equivalent_indoor_rh(
+                live.get("current_temp"),
+                coordinator.outdoor_temp_effective,
+                getattr(coordinator, "outdoor_humidity", None),
+            )
             humidity_model_info = {
                 "confidence": h_est.confidence,
                 "model": h_rc.to_dict(),
                 "n_samples": h_est._n_updates,
                 "n_observations": h_est._n_updates,
+                "n_idle": h_est._n_idle,
                 "n_humidifying": h_est._n_humidifying,
                 "n_dehumidifying": h_est._n_dehumidifying,
+                "last_update_at": h_est._last_update_at,
                 "applicable_modes": sorted(h_est._applicable_modes),
                 "mpc_active": bool(live.get("humidity_mpc_active", False)),
+                "prediction_std_idle": round(h_pred_idle, 2),
+                "prediction_std_humidify": round(h_pred_hum, 2),
+                "prediction_std_dehumidify": round(h_pred_dehum, 2),
+                "has_occupancy_sensors": has_occ,
+                "occupancy_learned": h_occ_learned,
+                "current_humidity": live.get("current_humidity"),
+                "outdoor_humidity": getattr(coordinator, "outdoor_humidity", None),
+                "outdoor_humidity_eq": round(outdoor_eq, 1),
+                "day_error_mae": h_day_err,
+                "day_error_steps": h_day_n,
             }
 
     # Build merged forecast: same format as history points, on a shared 5-min grid
@@ -652,43 +691,73 @@ async def build_analytics_data(
     if humidity_model_info:
         res_data["humidity_model"] = humidity_model_info
 
-    configured_plants = settings.get("heat_plants") if isinstance(settings, dict) else None
-    if isinstance(configured_plants, list) and configured_plants:
-        plants_live = getattr(coordinator, "heat_plants_live", {}) if coordinator else {}
-        plants_history: dict[str, list[dict]] = {}
-        if history_store and hasattr(history_store, "read_plant_detail"):
-            for p_cfg in configured_plants:
-                if not isinstance(p_cfg, dict) or not p_cfg.get("id"):
-                    continue
-                pid = str(p_cfg["id"])
-                try:
-                    if custom_start is not None:
-                        p_detail = _plant_csv_to_points(
-                            await hass.async_add_executor_job(
-                                history_store.read_plant_detail, pid, None, custom_start, custom_end
-                            )
-                        )
-                        p_hist = _plant_csv_to_points(
-                            await hass.async_add_executor_job(
-                                history_store.read_plant_history, pid, None, custom_start, custom_end
-                            )
-                        )
-                    else:
-                        max_age_val = now - range_start
-                        p_detail = _plant_csv_to_points(
-                            await hass.async_add_executor_job(history_store.read_plant_detail, pid, max_age_val)
-                        )
-                        p_hist = _plant_csv_to_points(
-                            await hass.async_add_executor_job(history_store.read_plant_history, pid, max_age_val)
-                        )
-                    plants_history[pid] = sorted(p_hist + p_detail, key=lambda pt: pt["ts"])
-                except Exception:  # noqa: BLE001
-                    plants_history[pid] = []
-        res_data["heat_plants"] = configured_plants
-        res_data["heat_plants_live"] = plants_live if isinstance(plants_live, dict) else {}
-        res_data["heat_plants_history"] = plants_history
-
     return res_data
+
+
+async def build_heat_plants_analytics_data(
+    hass: HomeAssistant,
+    range_key: str,
+    store: Any,
+    coordinator: Any,
+    custom_start: float | None = None,
+    custom_end: float | None = None,
+) -> dict:
+    """Build dedicated analytics response data for all configured boilers & heat sources."""
+    settings = store.get_settings() if store else {}
+    configured_plants = settings.get("heat_plants") if isinstance(settings, dict) else []
+    if not isinstance(configured_plants, list):
+        configured_plants = []
+
+    plants_live = getattr(coordinator, "heat_plants_live", {}) if coordinator else {}
+    history_store = getattr(coordinator, "_history_store", None) if coordinator else None
+    now = time.time()
+    max_age_map = {
+        "12h": 43200,
+        "24h": 86400,
+        "2d": 172800,
+        "7d": 604800,
+        "14d": 1209600,
+        "30d": 2592000,
+        "90d": 7776000,
+    }
+    max_age = max_age_map.get(range_key, 86400)
+    plants_history: dict[str, list[dict]] = {}
+
+    if history_store and hasattr(history_store, "read_plant_detail"):
+        for p_cfg in configured_plants:
+            if not isinstance(p_cfg, dict) or not p_cfg.get("id"):
+                continue
+            pid = str(p_cfg["id"])
+            try:
+                if custom_start is not None:
+                    p_detail = _plant_csv_to_points(
+                        await hass.async_add_executor_job(
+                            history_store.read_plant_detail, pid, None, custom_start, custom_end
+                        )
+                    )
+                    p_hist = _plant_csv_to_points(
+                        await hass.async_add_executor_job(
+                            history_store.read_plant_history, pid, None, custom_start, custom_end
+                        )
+                    )
+                else:
+                    p_detail = _plant_csv_to_points(
+                        await hass.async_add_executor_job(history_store.read_plant_detail, pid, max_age)
+                    )
+                    p_hist = _plant_csv_to_points(
+                        await hass.async_add_executor_job(history_store.read_plant_history, pid, max_age)
+                    )
+                plants_history[pid] = sorted(p_hist + p_detail, key=lambda pt: pt["ts"])
+            except Exception:  # noqa: BLE001
+                plants_history[pid] = []
+
+    return {
+        "heat_plants": configured_plants,
+        "heat_plants_live": plants_live if isinstance(plants_live, dict) else {},
+        "heat_plants_history": plants_history,
+        "outdoor_temp": getattr(coordinator, "outdoor_temp_effective", None) if coordinator else None,
+        "server_time": now,
+    }
 
 
 def _price_unit(hass: HomeAssistant, settings: dict) -> str:
